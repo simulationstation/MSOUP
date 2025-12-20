@@ -17,7 +17,7 @@ The model implements a "visibility horizon" that suppresses small-scale structur
 
 | Constraint | Implementation |
 |------------|----------------|
-| **(C1)** Visibility function | V(M; κ) = exp[-κ(M-2)] |
+| **(C1)** Visibility function | V(M; κ) = exp[-κ(M-2)] with fixed κ=1.0 (reported, not fitted) |
 | **(C2)** Visible order statistic | M_vis(z) = 2 + ΔM / (1 + exp[(z - z_t)/w]) |
 | **(C3)** Single response channel | c_eff²(z) derived from M_vis via sigmoid mapping |
 
@@ -29,6 +29,7 @@ The model implements a "visibility horizon" that suppresses small-scale structur
 | **Turn-on amplitude** | ΔM | How much M_vis rises above 2 | 0–2 |
 | **Transition redshift** | z_t | When suppression becomes active | 0.5–10 |
 | **Transition width** | w | How rapidly suppression activates | 0.05–2 |
+| **Visibility decay (fixed)** | κ | Set to 1.0 for all runs; reported for transparency | — |
 
 ### Modified Growth Equation
 
@@ -38,6 +39,12 @@ The model implements a "visibility horizon" that suppresses small-scale structur
 
 The last term causes scale-dependent suppression at high k (small scales).
 
+**Unit conventions**
+- k in h/Mpc (internally converted to 1/Mpc using h)
+- H(z) in km/s/Mpc
+- c_eff² in (km/s)²
+- Dimensionless factor in the ODE: (c_eff · k · h / H)²
+
 ---
 
 ## Data Sources
@@ -45,9 +52,11 @@ The last term causes scale-dependent suppression at high k (small scales).
 ### SPARC Rotation Curves
 
 - **Source**: http://astroweb.case.edu/SPARC/
+- **Archived mirror (preferred)**: Zenodo record 4274930 (`Rotmod_LTG.zip`)
 - **Reference**: Lelli et al. (2016), AJ 152, 157
 - **DOI**: [10.3847/0004-6256/152/6/157](https://doi.org/10.3847/0004-6256/152/6/157)
 - **Selection**: Dwarf/LSB galaxies with v_max < 80 km/s, ≥8 data points, quality ≤ 2
+- **Synthetic fallback**: If downloads are skipped (`--skip-download`) or fail, logs and outputs state “using synthetic data” and store that flag in `fit_results.json`.
 
 ### Strong Lensing Constraints
 
@@ -62,6 +71,10 @@ Compiled from published analyses:
 | Roman forecast | FORECAST | < 10^6.5 M⊙ | Projected |
 | Rubin forecast | FORECAST | < 10^7.0 M⊙ | Projected |
 
+**Lensing application modes**
+- **Conservative consistency check (default)**: each constraint is treated as a bound; per-paper satisfaction is reported in outputs.
+- **Hard likelihood**: Gaussian/upper-limit likelihoods aggregated only when explicitly requested and assumptions are documented.
+
 ---
 
 ## Methodology
@@ -75,15 +88,18 @@ For each galaxy:
 - **Per-galaxy parameters**: M_200, concentration c, M/L_disk (with priors)
 - **Global parameters**: (c_*², ΔM, z_t, w) shared across all galaxies
 
-### Half-Mode Mass
+### Half-Mode Mass and Wavenumber
 
 The primary diagnostic connecting rotation curves to lensing:
 
-M_hm = mass scale where HMF is suppressed by 50%
+- k_hm: wavenumber where P(k)/P_CDM(k) = 0.25
+- M_hm: mass scale derived from k_hm via (4π/3) ρ_m (π/k_hm)³
 
 This must satisfy:
 - **Lensing upper limits**: M_hm < 10^7.8 M⊙ (approximately)
 - **SPARC improvement**: Requires M_hm > 0 (some suppression)
+
+Both k_hm (h/Mpc) and M_hm (M⊙/h) are written to outputs.
 
 ---
 
@@ -115,6 +131,8 @@ results/
 ├── constraint_space.png   # χ²/DOF vs M_hm with lensing limits
 └── subhalo_mf.png         # Predicted subhalo MF suppression
 ```
+
+`fit_results.json` records the fixed visibility κ, k_hm, M_hm, and a per-paper lensing constraint table (not just a single boolean).
 
 ---
 

@@ -263,39 +263,94 @@ class LensingConstraints:
         return "\n".join(lines)
 
     def is_consistent(self, M_hm_model: float,
-                      use_forecasts: bool = False) -> Tuple[bool, str]:
+                      use_forecasts: bool = False,
+                      mode: str = "consistency") -> Tuple[bool, str]:
         """
         Check if model is consistent with constraints.
 
         Parameters:
             M_hm_model: Model prediction for half-mode mass
             use_forecasts: Include forecast constraints
+            mode: "consistency" (bounds) or "hard_likelihood"
 
         Returns:
             (is_consistent, message)
         """
+        evaluation = self.evaluate_constraints(
+            M_hm_model,
+            mode=mode,
+            use_forecasts=use_forecasts
+        )
+        return evaluation["overall_consistent"], evaluation["message"]
+
+    def evaluate_constraints(self,
+                             M_hm_model: float,
+                             mode: str = "consistency",
+                             use_forecasts: bool = False) -> Dict:
+        """
+        Evaluate constraints individually and optionally compute a hard likelihood.
+
+        Returns:
+            Dict with keys:
+              - mode
+              - overall_consistent (bool)
+              - log_likelihood (float, if mode=="hard_likelihood")
+              - constraints: list of per-constraint dicts
+              - message: human-readable summary
+        """
+        mode = mode.lower()
         constraints = (self.subhalo_mf_constraints if use_forecasts
-                      else self.get_hard_constraints())
+                       else self.get_hard_constraints())
 
+        applied = []
+        log_lik = 0.0
         violations = []
-        for c in constraints:
-            if c.is_upper_limit:
-                # For upper limits, model must be below
-                if M_hm_model > c.M_hm_limit + 2 * c.M_hm_uncertainty:
-                    violations.append(
-                        f"{c.name}: M_hm={M_hm_model:.2e} > limit={c.M_hm_limit:.2e}"
-                    )
-            else:
-                # For detections, model must not suppress too much
-                if M_hm_model > c.M_hm_limit + 2 * c.M_hm_uncertainty:
-                    violations.append(
-                        f"{c.name}: M_hm={M_hm_model:.2e} >> detection scale {c.M_hm_limit:.2e}"
-                    )
 
-        if violations:
-            return False, "VIOLATIONS:\n" + "\n".join(violations)
-        else:
-            return True, "Model consistent with all constraints"
+        for c in constraints:
+            bound = {
+                "type": "upper_limit" if c.is_upper_limit else "detection_bound",
+                "value": c.M_hm_limit,
+                "uncertainty": c.M_hm_uncertainty,
+            }
+
+            if c.is_upper_limit:
+                satisfied = M_hm_model <= c.M_hm_limit
+                detail = f"M_hm <= {c.M_hm_limit:.2e}"
+                sigma_distance = ((M_hm_model - c.M_hm_limit) /
+                                  max(c.M_hm_uncertainty, 1e-20))
+            else:
+                # Detection implies suppression scale must not overshoot this mass
+                satisfied = M_hm_model <= c.M_hm_limit + 2 * c.M_hm_uncertainty
+                detail = f"M_hm should not exceed {c.M_hm_limit:.2e} (detection scale)"
+                sigma_distance = ((M_hm_model - c.M_hm_limit) /
+                                  max(c.M_hm_uncertainty, 1e-20))
+
+            if mode == "hard_likelihood":
+                log_lik += c.log_likelihood(M_hm_model)
+
+            applied.append({
+                "name": c.name,
+                "type": c.constraint_type,
+                "reference": c.reference,
+                "satisfied": bool(satisfied),
+                "bound": bound,
+                "detail": detail,
+                "sigma_distance": sigma_distance,
+            })
+
+            if not satisfied:
+                violations.append(f"{c.name}: {detail} (model={M_hm_model:.2e})")
+
+        overall_consistent = (len(violations) == 0) if mode == "consistency" else True
+        message = "Model consistent with all constraints" if overall_consistent else "VIOLATIONS:\n" + "\n".join(violations)
+
+        return {
+            "mode": "hard_likelihood" if mode == "hard_likelihood" else "consistency",
+            "overall_consistent": overall_consistent,
+            "log_likelihood": log_lik if mode == "hard_likelihood" else None,
+            "constraints": applied,
+            "message": message,
+        }
 
 
 def convert_wdm_mass_to_M_hm(m_wdm_keV: float) -> float:

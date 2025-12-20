@@ -28,10 +28,11 @@ SPARC_DIR = DATA_DIR / "sparc_cache"
 SPARC_ZIP = SPARC_DIR / "Rotmod_LTG.zip"
 
 # URLs (primary and fallback)
+# Prefer stable archived source first to ensure reproducibility
+STABLE_SPARC_ARCHIVE = "https://zenodo.org/record/4274930/files/Rotmod_LTG.zip?download=1"
 SPARC_URLS = [
+    STABLE_SPARC_ARCHIVE,
     "http://astroweb.case.edu/SPARC/Rotmod_LTG.zip",
-    # Zenodo mirror as fallback
-    "https://zenodo.org/record/4274930/files/SPARC_Lelli2016c.mrt?download=1",
 ]
 
 # Table with galaxy properties
@@ -117,13 +118,16 @@ class GalaxyData:
         return False
 
 
-def download_sparc(force: bool = False, verbose: bool = True) -> bool:
+def download_sparc(force: bool = False,
+                   verbose: bool = True,
+                   prefer_archive: bool = True) -> bool:
     """
     Download SPARC data from official source.
 
     Parameters:
         force: Re-download even if files exist
         verbose: Print progress
+        prefer_archive: Try archived mirror first (Zenodo) for reproducibility
 
     Returns:
         True if successful
@@ -137,11 +141,14 @@ def download_sparc(force: bool = False, verbose: bool = True) -> bool:
         return True
 
     if verbose:
-        print("Downloading SPARC rotation curve data...")
+        source_pref = "archived mirror" if prefer_archive else "official site first"
+        print(f"Downloading SPARC rotation curve data ({source_pref})...")
 
     # Try primary URL first
     success = False
-    for url in SPARC_URLS:
+    url_candidates = SPARC_URLS if prefer_archive else list(reversed(SPARC_URLS))
+
+    for url in url_candidates:
         try:
             if verbose:
                 print(f"  Trying: {url}")
@@ -150,7 +157,9 @@ def download_sparc(force: bool = False, verbose: bool = True) -> bool:
             response.raise_for_status()
 
             # Check if it's a zip file
-            if url.endswith('.zip'):
+            content_type = response.headers.get("Content-Type", "").lower()
+            is_zip = url.lower().endswith('.zip') or 'zip' in content_type
+            if is_zip:
                 with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                     zf.extractall(SPARC_DIR)
                 success = True

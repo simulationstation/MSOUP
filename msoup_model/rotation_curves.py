@@ -19,7 +19,7 @@ import warnings
 
 from .visibility import MsoupParams
 from .cosmology import CosmologyParams
-from .growth import GrowthSolution, MsoupGrowthSolver
+from .growth import GrowthSolution, MsoupGrowthSolver, compute_half_mode_scale
 
 
 # Physical constants
@@ -294,41 +294,32 @@ class RotationCurveFitter:
         r_200_kpc = r_200_mpc * 1000
         r_s = r_200_kpc / c
 
-        # Suppression scale at formation
-        k_grid = self.growth_solution.k_grid
-        suppression = self.growth_solution.transfer_ratio(k_grid, z_form)
+        # Suppression scale at formation from half-mode definition
+        hm_scale = compute_half_mode_scale(
+            self.growth_solution,
+            z=z_form,
+            power_threshold=0.25
+        )
 
-        # Find k where suppression = 0.7 (halfway to significant)
-        threshold = 0.7
-        if np.all(suppression > threshold):
-            return 0.0
-
-        idx = np.where(suppression < threshold)[0]
-        if len(idx) == 0:
-            return 0.0
-
-        idx = idx[0]
-        if idx == 0:
-            k_c = k_grid[0]
+        if hm_scale.k_hm is None or hm_scale.k_hm <= 0:
+            # If suppression never reaches 25%, fall back to the most suppressed mode
+            ratios = self.growth_solution.power_ratio(self.growth_solution.k_grid, z_form)
+            if np.allclose(ratios, 1.0, atol=1e-4):
+                return 0.0
+            k_effective = self.growth_solution.k_grid[np.argmin(ratios)]
         else:
-            k1, k2 = k_grid[idx-1], k_grid[idx]
-            s1, s2 = suppression[idx-1], suppression[idx]
-            log_k_c = np.log10(k1) + (threshold - s1) / (s2 - s1) * (np.log10(k2) - np.log10(k1))
-            k_c = 10**log_k_c
+            k_effective = hm_scale.k_hm
 
-        # Convert to length scale
-        # k in h/Mpc, so 1/k in Mpc/h
-        r_suppress_mpc = 1.0 / k_c  # Mpc/h
-        r_suppress_kpc = r_suppress_mpc * 1000 / self.cosmo.h
+        # Convert suppression wavelength to physical length
+        r_halfmode_kpc = (np.pi / k_effective) * 1000 / self.cosmo.h  # kpc
 
-        # Core radius scales with suppression length and halo size
-        # r_c ~ r_suppress * (r_s / r_suppress)^0.5 (geometric mean)
-        r_c = np.sqrt(r_suppress_kpc * r_s)
+        # Core radius scales with the geometric mean of r_s and the suppression length
+        r_c = np.sqrt(r_halfmode_kpc * r_s)
 
-        # Cap at reasonable fraction of scale radius
-        r_c = min(r_c, 1.5 * r_s)
+        # Cap at a reasonable fraction of scale radius to avoid unphysical cores
+        r_c = np.clip(r_c, 0.0, 1.5 * r_s)
 
-        return max(r_c, 0.0)
+        return float(r_c)
 
     def fit_single_galaxy(self,
                           r: np.ndarray,

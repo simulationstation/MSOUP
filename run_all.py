@@ -34,9 +34,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from msoup_model import (
     MsoupParams, CosmologyParams, MsoupGrowthSolver,
     RotationCurveFitter, fit_galaxy_sample, validate_lcdm_limit,
-    HaloMassFunction
+    HaloMassFunction, compute_half_mode_scale,
+    VISIBILITY_KAPPA
 )
-from msoup_model.growth import compute_half_mode_mass
 from data.sparc import download_sparc, load_rotation_curve, get_dwarf_lsb_sample, create_synthetic_sparc_data
 from data.lensing import LensingConstraints
 
@@ -109,7 +109,7 @@ def load_galaxy_data(skip_download=False, n_galaxies=15, verbose=True):
 
     if skip_download:
         if verbose:
-            print("\nUsing synthetic SPARC-like data...")
+            print("\nUsing synthetic SPARC-like data (--skip-download => using synthetic data).")
         galaxies = create_synthetic_sparc_data(n_galaxies=n_galaxies, seed=SEED)
         use_real_data = False
     else:
@@ -130,7 +130,7 @@ def load_galaxy_data(skip_download=False, n_galaxies=15, verbose=True):
         except Exception as e:
             if verbose:
                 print(f"\nFailed to download SPARC: {e}")
-                print("Falling back to synthetic data...")
+                print("Falling back to synthetic data (download failed)...")
             galaxies = create_synthetic_sparc_data(n_galaxies=n_galaxies, seed=SEED)
             use_real_data = False
 
@@ -172,7 +172,11 @@ def run_fits(galaxies, verbose=True):
     best_result = None
     best_chi2 = np.inf
     best_params = None
-    best_M_hm = 0
+    best_M_hm = 0.0
+    best_k_hm = 0.0
+    best_lensing_eval = lensing.evaluate_constraints(
+        M_hm_model=0.0, mode="consistency", use_forecasts=False
+    )
 
     for c_sq in c_star_sq_grid:
         for DM in Delta_M_grid:
@@ -184,12 +188,20 @@ def run_fits(galaxies, verbose=True):
                 if c_sq > 0:
                     solver = MsoupGrowthSolver(params, cosmo, n_k=25, n_z=40)
                     solution = solver.solve()
-                    M_hm = compute_half_mode_mass(solution, z=0)
+                    hm = compute_half_mode_scale(solution, z=0)
+                    M_hm = hm.M_hm if hm.M_hm is not None else 0.0
+                    k_hm = hm.k_hm if hm.k_hm is not None else 0.0
                 else:
-                    M_hm = 0
+                    M_hm = 0.0
+                    k_hm = 0.0
 
                 # Check lensing
-                is_ok, _ = lensing.is_consistent(M_hm, use_forecasts=False)
+                lensing_eval = lensing.evaluate_constraints(
+                    M_hm_model=M_hm,
+                    mode="consistency",
+                    use_forecasts=False
+                )
+                is_ok = lensing_eval["overall_consistent"]
 
                 # Track best lensing-consistent model
                 if is_ok and result['chi2_per_dof'] < best_chi2:
@@ -197,12 +209,15 @@ def run_fits(galaxies, verbose=True):
                     best_result = result
                     best_params = params
                     best_M_hm = M_hm
+                    best_k_hm = k_hm
+                    best_lensing_eval = lensing_eval
 
     if best_params is None:
         # Fallback to CDM
         best_params = params_cdm
         best_result = results_cdm
         best_M_hm = 0
+        best_k_hm = 0
 
     if verbose:
         print(f"\n   Best parameters:")
@@ -211,6 +226,7 @@ def run_fits(galaxies, verbose=True):
         print(f"     z_t = {best_params.z_t}")
         print(f"     w = {best_params.w}")
         print(f"\n   Best χ²/DOF = {best_result['chi2_per_dof']:.3f}")
+        print(f"   k_hm = {best_k_hm:.2e} h/Mpc" if best_k_hm > 0 else "   k_hm = 0 (CDM)")
         print(f"   M_hm = {best_M_hm:.2e} M_sun" if best_M_hm > 0 else "   M_hm = 0 (CDM)")
 
     # Create plot
@@ -257,6 +273,8 @@ def run_fits(galaxies, verbose=True):
         'best_params': best_params,
         'best_M_hm': best_M_hm,
         'lensing': lensing,
+        'lensing_eval': best_lensing_eval,
+        'best_k_hm': best_k_hm,
     }
 
 
@@ -270,7 +288,11 @@ def run_decision(fit_results, use_real_data, verbose=True):
     results_dir = ensure_results_dir()
     params = fit_results['best_params']
     M_hm = fit_results['best_M_hm']
+    k_hm = fit_results.get('best_k_hm', 0.0)
     lensing = fit_results['lensing']
+    lensing_eval = fit_results.get('lensing_eval') or lensing.evaluate_constraints(
+        M_hm_model=M_hm, mode="consistency", use_forecasts=False
+    )
 
     cdm_chi2 = fit_results['cdm']['chi2_per_dof']
     best_chi2 = fit_results['best']['chi2_per_dof']
@@ -279,7 +301,7 @@ def run_decision(fit_results, use_real_data, verbose=True):
     # Check falsifiers
     falsifier_1 = params.z_t > 5
     falsifier_2 = M_hm > 1e12 if M_hm > 0 else False
-    is_ok, _ = lensing.is_consistent(M_hm, use_forecasts=False)
+    is_ok = lensing_eval["overall_consistent"]
     falsifier_3 = Delta_chi2 > 5 and not is_ok
 
     verdict = 'survives' if not (falsifier_1 or falsifier_2 or falsifier_3) else 'tension'
@@ -287,7 +309,7 @@ def run_decision(fit_results, use_real_data, verbose=True):
     if verbose:
         print(f"\n1. Redshift turn-on: z_t = {params.z_t} -> {'CONCERN' if falsifier_1 else 'OK'}")
         print(f"2. Scale dependence: M_hm = {M_hm:.2e} -> {'CONCERN' if falsifier_2 else 'OK'}")
-        print(f"3. Multi-probe: Δχ²={Delta_chi2:.1f}, lensing_ok={is_ok} -> {'CONCERN' if falsifier_3 else 'OK'}")
+        print(f"3. Multi-probe: Δχ²={Delta_chi2:.1f}, lensing_ok={is_ok} (mode={lensing_eval.get('mode')}) -> {'CONCERN' if falsifier_3 else 'OK'}")
         print(f"\nVERDICT: {verdict.upper()}")
 
     # Save summary
@@ -295,6 +317,8 @@ def run_decision(fit_results, use_real_data, verbose=True):
         'timestamp': datetime.now().isoformat(),
         'model': 'Msoup closure v0.1.0',
         'data': 'SPARC' if use_real_data else 'synthetic',
+        'data_note': "using synthetic data (--skip-download or download failure)" if not use_real_data else "downloaded SPARC archive/preferred mirror",
+        'visibility_kappa': VISIBILITY_KAPPA,
         'best_parameters': {
             'c_star_sq': float(params.c_star_sq),
             'Delta_M': float(params.Delta_M),
@@ -305,8 +329,11 @@ def run_decision(fit_results, use_real_data, verbose=True):
             'cdm_chi2_per_dof': float(cdm_chi2),
             'msoup_chi2_per_dof': float(best_chi2),
             'delta_chi2': float(Delta_chi2),
+            'k_hm': float(k_hm) if k_hm > 0 else None,
             'M_hm': float(M_hm) if M_hm > 0 else None,
             'lensing_consistent': is_ok,
+            'lensing_mode': lensing_eval.get("mode"),
+            'lensing_constraints': lensing_eval.get("constraints", []),
         },
         'falsifiers': {
             'wrong_redshift_turnon': falsifier_1,
@@ -327,6 +354,8 @@ def run_smoke_test():
     print("\n" + "="*60)
     print("SMOKE TEST: Quick validation")
     print("="*60)
+    print(f"Visibility decay κ (fixed): {VISIBILITY_KAPPA}")
+    print(f"Free parameters: {MsoupParams.param_names()}")
 
     results_dir = ensure_results_dir()
 
@@ -350,11 +379,14 @@ def run_smoke_test():
     print("\n3. Lensing constraint check...")
     solver = MsoupGrowthSolver(params, cosmo, n_k=20, n_z=30)
     solution = solver.solve()
-    M_hm = compute_half_mode_mass(solution, z=0)
+    hm = compute_half_mode_scale(solution, z=0)
+    M_hm = hm.M_hm if hm.M_hm is not None else 0.0
     lensing = LensingConstraints.load_default()
-    is_ok, msg = lensing.is_consistent(M_hm, use_forecasts=False)
+    lensing_eval = lensing.evaluate_constraints(M_hm, mode="consistency", use_forecasts=False)
+    is_ok = lensing_eval["overall_consistent"]
+    print(f"   k_hm = {hm.k_hm:.2e} h/Mpc" if hm.k_hm else "   k_hm = 0 (no suppression)")
     print(f"   M_hm = {M_hm:.2e} M_sun")
-    print(f"   Lensing OK: {is_ok}")
+    print(f"   Lensing OK (consistency mode): {is_ok}")
     print("   PASSED")
 
     # 4. Generate simple plot

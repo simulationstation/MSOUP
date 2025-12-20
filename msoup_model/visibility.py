@@ -7,13 +7,15 @@ The minimal closure model has:
   - c_eff^2(z): effective "viscosity" tied to M_vis via fixed monotone map
 
 Parameters:
-  kappa: visibility decay rate (kept in code but absorbed into effective params)
   Delta_M: amplitude above threshold M=2
   z_t: transition redshift (when M_vis rises most rapidly)
   w: transition width
   c_star_sq: maximum effective sound speed squared
   Delta_threshold: threshold for sigmoid mapping (default: small value)
   sigma_map: width of sigmoid mapping (default: 0.1)
+
+Fixed (non-free) constant:
+  VISIBILITY_KAPPA: visibility decay rate in V(M; κ) = exp[-κ (M-2)]
 """
 
 import numpy as np
@@ -21,6 +23,9 @@ from dataclasses import dataclass
 from typing import Union, Optional
 
 ArrayLike = Union[float, np.ndarray]
+
+# Visibility decay is fixed (not a scanned parameter)
+VISIBILITY_KAPPA: float = 1.0
 
 
 @dataclass
@@ -35,7 +40,7 @@ class MsoupParams:
       - c_star_sq: effective sound speed squared (km/s)^2
 
     Fixed/absorbed parameters:
-      - kappa: visibility decay (kept for documentation, absorbed)
+      - kappa: visibility decay (fixed, documented via VISIBILITY_KAPPA)
       - Delta_threshold: sigmoid threshold offset (fixed)
       - sigma_map: sigmoid width (fixed)
     """
@@ -45,7 +50,6 @@ class MsoupParams:
     c_star_sq: float = 100.0    # (km/s)^2, suppression strength
 
     # Fixed parameters (not varied in fits)
-    kappa: float = 1.0          # Absorbed into Delta_M effectively
     Delta_threshold: float = 0.1  # Small offset in sigmoid
     sigma_map: float = 0.1      # Sigmoid width
 
@@ -83,6 +87,15 @@ class MsoupParams:
         """LaTeX labels for plotting."""
         return [r"$c_*^2$", r"$\Delta M$", r"$z_t$", r"$w$"]
 
+    @property
+    def kappa(self) -> float:
+        """
+        Fixed visibility decay rate κ.
+
+        Kept as a property for clarity; NOT a free parameter.
+        """
+        return VISIBILITY_KAPPA
+
     @staticmethod
     def get_prior_bounds() -> dict:
         """Prior bounds for MCMC sampling."""
@@ -94,7 +107,7 @@ class MsoupParams:
         }
 
 
-def visibility(M: ArrayLike, kappa: float = 1.0) -> ArrayLike:
+def visibility(M: ArrayLike, kappa: float = VISIBILITY_KAPPA) -> ArrayLike:
     """
     Visibility function V(M; kappa) = exp[-kappa * (M - 2)].
 
