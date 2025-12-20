@@ -14,8 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from msoup_model import (
     MsoupParams, CosmologyParams, MsoupGrowthSolver,
     visibility, m_vis, c_eff_squared, validate_lcdm_limit,
-    HaloMassFunction
+    HaloMassFunction, compute_half_mode_scale,
+    RotationCurveFitter, nfw_velocity, cored_nfw_velocity,
+    VISIBILITY_KAPPA
 )
+from data.lensing import LensingConstraints
 
 
 class TestVisibility:
@@ -41,6 +44,12 @@ class TestVisibility:
         V1 = visibility(3.0, kappa=1.0)
         V2 = visibility(3.0, kappa=2.0)
         assert V2 < V1
+
+    def test_visibility_fixed_kappa_constant(self):
+        """Fixed κ should be exposed but not treated as free."""
+        assert np.isclose(VISIBILITY_KAPPA, 1.0)
+        V = visibility(3.0)
+        assert np.isclose(V, np.exp(-VISIBILITY_KAPPA))
 
 
 class TestMvis:
@@ -204,9 +213,99 @@ class TestGrowthSolver:
         assert solution.z_grid.shape == (20,)
         assert solution.D_kz.shape == (15, 20)
 
+    def test_growth_units_dimensionless(self):
+        """(c_eff * k / H)^2 term must be dimensionless."""
+        params = MsoupParams(c_star_sq=150, Delta_M=0.5, z_t=2.0, w=0.5)
+        cosmo = CosmologyParams()
+        solver = MsoupGrowthSolver(params, cosmo, k_min=1.0, k_max=1.0, n_k=1, z_max=0.0, n_z=2)
+        k = 1.0
+        z = 0.5
+        term = solver._dimensionless_suppression_term(k, z)
+        c_eff = np.sqrt(c_eff_squared(z, params))
+        expected = (c_eff * k * cosmo.h / cosmo.H(z))**2
+        assert np.isclose(term, expected, rtol=1e-6)
+
+    def test_cdm_matches_lcdm_growth(self):
+        """c_*^2=0 should return LCDM growth to within tolerance."""
+        params = MsoupParams(c_star_sq=0.0, Delta_M=0.5, z_t=2.0, w=0.5)
+        cosmo = CosmologyParams()
+        solver = MsoupGrowthSolver(params, cosmo, k_min=0.05, k_max=1.0, n_k=5, z_max=5.0, n_z=25)
+        solution = solver.solve()
+        D_ref = cosmo.growth_factor_lcdm(solution.z_grid)
+        assert np.allclose(solution.D_kz, D_ref[None, :], atol=1e-3, rtol=1e-3)
+
+    def test_power_suppression_monotone(self):
+        """P/P_CDM should be monotone non-increasing with k and in [0,1]."""
+        params = MsoupParams(c_star_sq=120, Delta_M=0.5, z_t=2.0, w=0.5)
+        cosmo = CosmologyParams()
+        solver = MsoupGrowthSolver(params, cosmo, k_min=0.01, k_max=5.0, n_k=40, z_max=3.0, n_z=30)
+        solution = solver.solve()
+        ratio = solution.power_ratio(solution.k_grid, z=0)
+        assert np.all(ratio <= 1.0 + 1e-8)
+        assert np.all(np.diff(ratio) <= 1e-6)
+
 
 class TestHaloMassFunction:
     """Tests for halo mass function."""
+
+
+class TestHalfModeMapping:
+    """Tests for half-mode mass and k mapping."""
+
+    def test_half_mode_mapping_matches_definition(self):
+        """Synthetic suppression with known k_hm should map to expected M_hm."""
+        cosmo = CosmologyParams()
+        params = MsoupParams()
+        k_grid = np.logspace(-2, 1, 60)
+        k_hm_true = k_grid[34]  # ensure grid contains the crossing point
+        power_ratio = np.clip(1 - 0.75 * (k_grid / k_hm_true), 0.25, 1.0)
+        transfer = np.sqrt(power_ratio)
+        z_grid = np.array([0.0, 0.5, 1.0, 2.0, 3.0])
+        D_kz = transfer[:, None] * np.ones((1, len(z_grid)))
+        D_lcdm_z = np.ones_like(z_grid)
+
+        from msoup_model.growth import GrowthSolution
+
+        solution = GrowthSolution(
+            k_grid=k_grid,
+            z_grid=z_grid,
+            D_kz=D_kz,
+            D_lcdm_z=D_lcdm_z,
+            params=params,
+            cosmo=cosmo,
+        )
+
+        hm = compute_half_mode_scale(solution, z=0, power_threshold=0.25)
+        M_expected = (4.0 / 3.0) * np.pi * cosmo.rho_m_0 * (np.pi / k_hm_true)**3
+        assert np.isclose(hm.k_hm, k_hm_true, rtol=0.05)
+        assert np.isclose(hm.M_hm, M_expected, rtol=0.05)
+
+
+class TestRotationCurveCores:
+    """Tests for rotation curve coring logic."""
+
+    def test_core_radius_zero_when_unsuppressed(self):
+        """c_*^2 = 0 should give r_c=0 and NFW equivalence."""
+        params = MsoupParams(c_star_sq=0.0, Delta_M=0.5, z_t=2.0, w=0.5)
+        cosmo = CosmologyParams()
+        fitter = RotationCurveFitter(cosmo=cosmo, msoup_params=params)
+        r_c = fitter.core_radius(M200=1e10, c=10.0)
+        assert np.isclose(r_c, 0.0)
+
+        r = np.linspace(0.5, 5.0, 20)
+        v_nfw = nfw_velocity(r, 1e10, 10.0, cosmo)
+        v_cored = cored_nfw_velocity(r, 1e10, 10.0, r_c, cosmo)
+        assert np.allclose(v_nfw, v_cored, atol=1e-6)
+
+
+class TestLensingConstraints:
+    """Tests for lensing constraint evaluation."""
+
+    def test_consistency_mode_reports_constraints(self):
+        lensing = LensingConstraints.load_default()
+        evaluation = lensing.evaluate_constraints(1e7, mode="consistency", use_forecasts=False)
+        assert "constraints" in evaluation and len(evaluation["constraints"]) > 0
+        assert evaluation["mode"] == "consistency"
 
     def test_hmf_ratio_unity_for_cdm(self):
         """HMF ratio should be ~1 for CDM (no suppression)."""

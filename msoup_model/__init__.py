@@ -19,8 +19,15 @@ The model maps these 4 parameters to:
   - Half-mode mass for lensing constraints
 """
 
-from .visibility import visibility, m_vis, c_eff_squared, MsoupParams
-from .growth import MsoupGrowthSolver, GrowthSolution, validate_lcdm_limit
+from .visibility import visibility, m_vis, c_eff_squared, MsoupParams, VISIBILITY_KAPPA
+from .growth import (
+    MsoupGrowthSolver,
+    GrowthSolution,
+    validate_lcdm_limit,
+    compute_half_mode_scale,
+    compute_half_mode_mass,
+    HalfModeScale,
+)
 from .cosmology import CosmologyParams
 from .halo import HaloMassFunction, HaloMFResult
 from .rotation_curves import (
@@ -39,10 +46,14 @@ __all__ = [
     "m_vis",
     "c_eff_squared",
     "MsoupParams",
+    "VISIBILITY_KAPPA",
     # Growth and cosmology
     "MsoupGrowthSolver",
     "GrowthSolution",
     "validate_lcdm_limit",
+    "compute_half_mode_scale",
+    "compute_half_mode_mass",
+    "HalfModeScale",
     "CosmologyParams",
     # Halo mass function
     "HaloMassFunction",

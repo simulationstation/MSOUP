@@ -70,7 +70,7 @@ class GrowthSolution:
     def transfer_ratio(self, k: np.ndarray, z: float = 0) -> np.ndarray:
         """Transfer function ratio T(k)/T_LCDM(k) at given z."""
         ratio = self.suppression(k, np.array([z]))[:, 0]
-        return np.clip(ratio, 0, 2)  # Sanity bounds
+        return np.clip(ratio, 0, 1)  # Sanity bounds (no enhancement)
 
     def power_ratio(self, k: np.ndarray, z: float = 0) -> np.ndarray:
         """Power spectrum ratio P(k)/P_LCDM(k) at given z."""
@@ -119,24 +119,28 @@ class MsoupGrowthSolver:
         We use a smooth transition:
             T(k, z) = 1 / (1 + (k / k_J)^2)^(1/2)
         """
-        c_eff_sq = c_eff_squared(z, self.params)
+        suppression_term = self._dimensionless_suppression_term(k, z)
+        return 1.0 / np.sqrt(1.0 + suppression_term)
 
-        if c_eff_sq < 1e-10:
-            return 1.0  # No suppression
+    def _dimensionless_suppression_term(self, k: float, z: float) -> float:
+        """
+        Dimensionless combination (c_eff * k_phys / H)^2.
 
-        c_eff = np.sqrt(c_eff_sq)  # km/s
-        H_z = self.cosmo.H(z)  # km/s/Mpc
-        h = self.cosmo.h
+        Ensures consistent unit handling:
+          - k is provided in h/Mpc and converted to 1/Mpc via h
+          - c_eff is in km/s
+          - H is in km/s/Mpc
+        """
+        c_eff_sq = float(np.maximum(c_eff_squared(z, self.params), 0.0))
+        if c_eff_sq <= 0:
+            return 0.0
 
-        # Jeans wavenumber: k_J = H / c_eff in 1/Mpc, convert to h/Mpc
-        # k_J [h/Mpc] = (H [km/s/Mpc] / c_eff [km/s]) / h
-        k_J = H_z / c_eff / h
+        H_z = float(self.cosmo.H(z))
+        if H_z <= 0:
+            return 0.0
 
-        # Suppression factor
-        x = k / k_J
-        suppression = 1.0 / np.sqrt(1.0 + x**2)
-
-        return suppression
+        k_phys = k * self.cosmo.h  # 1/Mpc
+        return c_eff_sq * (k_phys / H_z)**2
 
     def _solve_growth_ode(self, k: float) -> np.ndarray:
         """
@@ -164,24 +168,14 @@ class MsoupGrowthSolver:
             # d ln H / d ln a = -(3/2) Ω_m / E²
             dlnH_dlna = -1.5 * self.cosmo.Omega_m * (1 + z)**3 / E**2
 
-            # Growth equation coefficients
-            c_eff_sq = c_eff_squared(z, self.params)
-            H_z = self.cosmo.H(z)
-            h = self.cosmo.h
-
             # Friction term coefficient
             friction = 2.0 + dlnH_dlna
 
             # Source term (gravity)
             source = 1.5 * Om_z * D
 
-            # Suppression term
-            # k in h/Mpc, H in km/s/Mpc, c_eff in km/s
-            # (c_eff * k * h / H)² is dimensionless
-            if c_eff_sq > 0 and H_z > 0:
-                suppression = c_eff_sq * (k * h)**2 / H_z**2 * D
-            else:
-                suppression = 0.0
+            # Suppression term (dimensionless by construction)
+            suppression = self._dimensionless_suppression_term(k, z) * D
 
             # Second derivative
             d2D_dlna2 = source - friction * dD_dlna - suppression
@@ -313,33 +307,70 @@ def compute_half_mode_mass(solution: GrowthSolution, z: float = 0,
 
     M_hm is the mass scale where P(k)/P_LCDM(k) = threshold² (default 0.25).
     """
+    scale = compute_half_mode_scale(solution, z=z, power_threshold=threshold**2)
+    return scale.M_hm if scale.M_hm is not None else 0.0
+
+
+@dataclass
+class HalfModeScale:
+    """Half-mode scale information."""
+    k_hm: Optional[float]
+    M_hm: Optional[float]
+    power_threshold: float
+    z: float
+
+
+def compute_half_mode_scale(solution: GrowthSolution,
+                            z: float = 0,
+                            power_threshold: float = 0.25) -> HalfModeScale:
+    """
+    Compute the half-mode wavenumber and mass using power suppression.
+
+    Args:
+        solution: GrowthSolution
+        z: redshift at which to evaluate
+        power_threshold: P/P_CDM threshold (default 0.25)
+
+    Returns:
+        HalfModeScale with k_hm (h/Mpc) and M_hm (M_sun/h) or None if not crossed.
+    """
     k_grid = solution.k_grid
-    suppression = solution.transfer_ratio(k_grid, z)
 
-    # Find k where suppression = threshold
-    if np.all(suppression > threshold):
-        return 0.0  # No suppression reaches threshold
-    if np.all(suppression < threshold):
-        return np.inf
+    # Use raw grid values when the requested z sits on the tabulated grid
+    z_matches = np.where(np.isclose(solution.z_grid, z, atol=1e-8))[0]
+    if len(z_matches) > 0:
+        idx = z_matches[0]
+        transfer = solution.D_kz[:, idx] / np.maximum(solution.D_lcdm_z[idx], 1e-12)
+        ratio = np.clip(transfer**2, 0.0, 1.0)
+    else:
+        ratio = solution.power_ratio(k_grid, z)
+    ratio = np.clip(ratio, 0.0, 1.0)
 
-    # Find crossing
-    idx = np.where(suppression < threshold)[0]
-    if len(idx) == 0:
-        return 0.0
+    # Enforce monotonic decrease to avoid grid artifacts
+    ratio_mono = np.minimum.accumulate(ratio)
 
-    idx = idx[0]
+    below = np.where(ratio_mono <= power_threshold)[0]
+    if len(below) == 0:
+        return HalfModeScale(k_hm=None, M_hm=None,
+                             power_threshold=power_threshold, z=z)
+
+    idx = below[0]
     if idx == 0:
         k_hm = k_grid[0]
     else:
-        # Linear interpolation in log k
         k1, k2 = k_grid[idx-1], k_grid[idx]
-        s1, s2 = suppression[idx-1], suppression[idx]
-        log_k_hm = np.log10(k1) + (threshold - s1) / (s2 - s1 + 1e-10) * (np.log10(k2) - np.log10(k1))
-        k_hm = 10**log_k_hm
+        r1, r2 = ratio_mono[idx-1], ratio_mono[idx]
+        if abs(r2 - r1) < 1e-12:
+            denom = -1e-12  # enforce decreasing interpolation
+        else:
+            denom = r2 - r1
+        frac = np.clip((power_threshold - r1) / denom, 0.0, 1.0)
+        log_k_hm = np.log(k1) + frac * (np.log(k2) - np.log(k1))
+        k_hm = np.exp(log_k_hm)
 
-    # Convert k to mass
     rho_m = solution.cosmo.rho_m_0  # h^2 M_sun / Mpc^3
     R = np.pi / k_hm  # Mpc/h
     M_hm = (4.0 / 3.0) * np.pi * rho_m * R**3  # M_sun/h
 
-    return M_hm
+    return HalfModeScale(k_hm=k_hm, M_hm=M_hm,
+                         power_threshold=power_threshold, z=z)
