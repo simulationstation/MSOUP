@@ -47,6 +47,11 @@ def _discover_bands(lens_dir: Path) -> List[str]:
         band_dir = lens_dir / band
         if band_dir.is_dir() and (band_dir / "data.fits").exists():
             bands.append(band)
+            continue
+        # Fallback for flat layouts used in tests
+        alt_data = lens_dir / f"{lens_dir.name}_{band}_science.fits"
+        if alt_data.exists():
+            bands.append(band)
     return bands
 
 
@@ -107,6 +112,24 @@ def discover_lenses(
                     model_products=_discover_model_products(lens_dir),
                 )
             )
+    if records:
+        return records
+
+    # Fallback: treat each subdirectory as a lens when score-bin layout is absent
+    for lens_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
+        bands = _discover_bands(lens_dir)
+        if not bands:
+            continue
+        records.append(
+            LensRecord(
+                lens_id=lens_dir.name,
+                path=lens_dir,
+                score_bin="UNKNOWN",
+                available_bands=bands,
+                catalogue_row=None,
+                model_products=_discover_model_products(lens_dir),
+            )
+        )
     return records
 
 
@@ -234,11 +257,20 @@ def locate_band_files(lens_dir: Path, band: str) -> Tuple[Optional[Path], Option
     - {lens_dir}/{band}/noise_map.fits (noise)
     """
     band_dir = lens_dir / band
-    if not band_dir.is_dir():
-        return None, None
+    science = None
+    noise = None
 
-    science = band_dir / "data.fits" if (band_dir / "data.fits").exists() else None
-    noise = band_dir / "noise_map.fits" if (band_dir / "noise_map.fits").exists() else None
+    if band_dir.is_dir():
+        science = band_dir / "data.fits" if (band_dir / "data.fits").exists() else None
+        noise = band_dir / "noise_map.fits" if (band_dir / "noise_map.fits").exists() else None
+
+    # Flat layout fallback
+    if science is None:
+        alt_science = lens_dir / f"{lens_dir.name}_{band}_science.fits"
+        if alt_science.exists():
+            science = alt_science
+            alt_noise = lens_dir / f"{lens_dir.name}_{band}_noise.fits"
+            noise = alt_noise if alt_noise.exists() else noise
 
     return science, noise
 
