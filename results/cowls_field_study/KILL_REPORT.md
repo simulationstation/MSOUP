@@ -1,33 +1,46 @@
 # COWLS Field-Level Detection: Kill Analysis Report
 
-## Executive Summary
+## Strict Verdict
 
-**VERDICT: SIGNAL SURVIVES - No kill conditions triggered**
-**Confidence: High confidence (4-5/5 checks passed)**
+**VERDICT: SIGNAL STATISTICALLY SIGNIFICANT BUT LIKELY SYSTEMATIC**
 
-### Sample Overview
+The observed Global Z_corr = 3.574 is statistically significant (p_emp < 0.002) under both null methods. However, **three critical issues** indicate the signal is dominated by modeling systematics rather than dark substructure:
+
+1. **Low-m dominance**: ρ = 0.937 (p < 10⁻¹⁵) — signal is entirely in m ≤ 3 modes
+2. **Band inconsistency**: Only 38% of lenses show consistent Z_corr signs across bands
+3. **Shift-null degeneracy**: σ_shift ≈ 0 — shift null lacks variance (see Section C)
+
+**Conclusion**: The correlation signal is real but arises from large-scale (low-m) model residuals, not localized substructure perturbations. Band-dependent sign flips rule out achromatic gravitational effects.
+
+---
+
+## Sample Overview
 
 | Score Bin | N Lenses | Mean Z_corr | Std |
 |-----------|----------|-------------|-----|
-| M25 | 17 | 0.893 | 0.141 |
-| S10 | 12 | 0.487 | 0.613 |
-| S11 | 3 | -0.033 | 0.437 |
-| S12 | 2 | 0.220 | 0.570 |
-| **Total** | **34** | **0.628** | **0.519** |
+| M25 | 17 | 0.890 | 0.161 |
+| S10 | 12 | 0.490 | 0.609 |
+| S11 | 3 | -0.140 | 0.369 |
+| S12 | 2 | 0.125 | 0.595 |
+| **Total** | **34** | **0.613** | **0.533** |
 
-- Original Global Z_corr: 3.663
-- Original Global Z_pow: -0.703
-- Residual type: All 34 lenses used model residuals (source_light + lens_light subtraction)
+- Global Z_corr: 3.574
+- Global Z_pow: -0.780
+- Residual type: All 34 lenses used model residuals
 
 ---
 
 ## Kill Condition Checklist
 
-- ✓ NOT TRIGGERED: Null p-values < 0.01
-- ✓ NOT TRIGGERED: No single lens dominates
-- ✓ NOT TRIGGERED: LOO min (3.54) stays above 3σ
-- ✓ NOT TRIGGERED: Weak proxy correlations (max |ρ| = 0.44)
-- ❌ TRIGGERED: Low-m dominance correlates with Z_corr (ρ=1.00)
+| Condition | Status | Value | Threshold |
+|-----------|--------|-------|-----------|
+| Null p-value > 0.01 | ✓ PASS | p_resample = 0.001 | < 0.01 |
+| Single lens dominates | ✓ PASS | max drop = 0.12σ | < 0.5σ |
+| LOO min < 3σ | ✓ PASS | LOO min = 3.45 | > 3.0 |
+| Proxy correlation > 0.5 | ✓ PASS | max |ρ| = 0.43 | < 0.5 |
+| Low-m dominance > 0.6 | ❌ FAIL | ρ = 0.94 | < 0.6 |
+| Band consistency < 50% | ❌ FAIL | 38% | > 50% |
+| Shift-null σ ≈ 0 | ❌ FAIL | σ = 1.6×10⁻⁸ | > 0.1 |
 
 ---
 
@@ -38,20 +51,20 @@
 | Metric | Value |
 |--------|-------|
 | n_lenses | 34 |
-| mean(Z_corr) | 0.6282 |
-| Global Z_corr | 3.663 |
-| Z_corr min/median/max | -0.71 / 0.91 / 1.00 |
+| mean(Z_corr) | 0.6129 |
+| Global Z_corr | 3.574 |
+| Z_corr min/median/max | -0.72 / 0.93 / 1.00 |
 
 ### Dominance Analysis
 
 | Metric | Value |
 |--------|-------|
-| Top 1 lens contribution | 4.7% |
-| Top 3 lens contribution | 13.9% |
-| Top 5 lens contribution | 23.1% |
-| Global Z without top 1 | 3.544 |
-| Global Z without top 3 | 3.303 |
-| Global Z without top 5 | 3.051 |
+| Top 1 lens contribution | 4.8% |
+| Top 3 lens contribution | 14.3% |
+| Top 5 lens contribution | 23.7% |
+| Global Z without top 1 | 3.454 |
+| Global Z without top 3 | 3.210 |
+| Global Z without top 5 | 2.954 |
 
 ![Z_corr Distribution](kill_plots/a_zcorr_distribution.png)
 
@@ -61,14 +74,14 @@
 
 | Metric | Value |
 |--------|-------|
-| LOO min | 3.544 |
-| LOO median | 3.560 |
-| LOO max | 3.842 |
+| LOO min | 3.454 |
+| LOO median | 3.467 |
+| LOO max | 3.753 |
 | Max drop lens | COSJ100013+023424 |
-| Max drop value | 0.119 |
+| Max drop value | 0.120 |
 | Dominance alarm | NO |
-| Jackknife mean | 0.6282 |
-| Jackknife SE | 0.0903 |
+| Jackknife mean | 0.6129 |
+| Jackknife SE | 0.0929 |
 
 ![Leave-One-Out](kill_plots/b_leave_one_out.png)
 
@@ -76,16 +89,23 @@
 
 ## Section C: Null Adequacy Tests
 
-For each of 34 lenses, we generated 20 synthetic r(θ) profiles under the null hypothesis and computed Global Z_corr.
+| Null Method | G Used | Mean Synth Z | Std Synth Z | p_emp | 95% CI |
+|-------------|--------|--------------|-------------|-------|--------|
+| Resample | 1000 | 0.068 | 1.026 | 0.001 | [0.00003, 0.0037] |
+| Shift | 500 | ~0 | **1.6×10⁻⁸** | 0.002 | [0.00005, 0.0073] |
 
-| Null Method | N Simulations | Mean Synth Z | Std Synth Z | p(synth ≥ obs) |
-|-------------|---------------|--------------|-------------|----------------|
-| Resample | 20 | -0.14 | 1.07 | 0.00 |
-| Shift | 20 | 0.00 | 0.00 | 0.00 |
+**Empirical p-values**:
+- p_resample = 0.001 (1 exceedance in 1000 draws)
+- p_shift = 0.002 (1 exceedance in 500 draws)
 
-**Null Warning: NO - nulls are well-calibrated**
+**⚠️ CRITICAL: Shift-null variance is degenerate (σ ≈ 0)**
 
-The observed Global Z_corr = 3.66 was never exceeded in 20 synthetic realizations (p < 0.05), confirming the null machinery is not generating false positives.
+The shift null produces identical global Z values across all 500 draws, indicating it does not generate meaningful variability. This occurs because circular shifts preserve the autocorrelation structure of the profile. The p_shift value is therefore **not trustworthy** as a significance estimate.
+
+The resample null is well-calibrated (σ ≈ 1.0, mean ≈ 0) and provides the primary significance estimate.
+
+- Observed Z_corr: 3.574
+- Lenses used: 34/34 (no exclusions)
 
 ![Null Adequacy](kill_plots/c_null_adequacy.png)
 
@@ -95,12 +115,12 @@ The observed Global Z_corr = 3.66 was never exceeded in 20 synthetic realization
 
 | Proxy | Spearman ρ | p-value | N |
 |-------|------------|---------|---|
-| residual_rms | 0.441 | 0.0090 | 34 |
-| coverage | -0.108 | 0.5427 | 34 |
-| texture | -0.029 | 0.8696 | 34 |
-| psf_fwhm | 0.199 | 0.2593 | 34 |
+| residual_rms | 0.429 | 0.0113 | 34 |
+| coverage | -0.114 | 0.5203 | 34 |
+| texture | -0.001 | 0.9945 | 34 |
+| psf_fwhm | 0.183 | 0.2991 | 34 |
 
-**Strongest proxy: residual_rms (ρ = 0.441)**
+**Strongest proxy: residual_rms (ρ = 0.429)**
 
 ![Artifact Proxies](kill_plots/d_artifact_proxies.png)
 
@@ -108,11 +128,18 @@ The observed Global Z_corr = 3.66 was never exceeded in 20 synthetic realization
 
 ## Section E: Frequency Structure
 
-- Low-m (m≤3) dominance correlation with Z_corr: ρ = 1.000 *(Note: based on sparse valid samples)*
-- Mean low-m ratio: 0.279 (fraction of power in m=1,2,3 modes)
-- Lenses with high Z_corr (>0.9) but negative Z_pow: 13/34 (38%)
+| Metric | Value | p-value |
+|--------|-------|---------|
+| Low-m Spearman ρ | 0.937 | < 10⁻¹⁵ |
+| Low-m Pearson r | 0.569 | 0.0004 |
+| Mean low-m ratio | 0.163 | — |
+| High Z_corr + neg Z_pow | 13/34 (38%) | — |
 
-**Interpretation**: The correlation signal is dominated by low-frequency angular modes, not high-frequency localized structure. This pattern is more consistent with macro-model mismatch than subhalo perturbations.
+**⚠️ CRITICAL: Signal is low-m dominated**
+
+The extremely strong correlation (ρ = 0.937) between Z_corr and low-m power ratio means that **lenses with high Z_corr have their signal concentrated in modes m ≤ 3** (large-scale angular structure). This is inconsistent with subhalo perturbations, which would produce power at higher angular frequencies corresponding to subhalo angular scales.
+
+The pattern Z_corr >> 0 with Z_pow ~ 0 (seen in 38% of lenses) indicates smooth, large-scale residual structure—characteristic of macro-model mismatch (e.g., incorrect ellipticity, shear, or source morphology) rather than localized gravitational perturbations.
 
 ![Frequency Structure](kill_plots/e_frequency_structure.png)
 
@@ -120,24 +147,34 @@ The observed Global Z_corr = 3.66 was never exceeded in 20 synthetic realization
 
 ## Section F: Band Consistency
 
-- Multi-band lenses available: 34 (all have F115W, F150W, F277W, F444W)
-- Lenses tested for cross-band consistency: 5
-- Sign consistency across all 4 bands: 3/5 = 60%
+| Metric | Value |
+|--------|-------|
+| Multi-band lenses | 34 (all have F115W, F150W, F277W, F444W) |
+| Sign consistency | **13/34 = 38%** |
+| Mean per-lens Z_corr variance | 0.192 |
+| F150W vs F277W correlation | r = -0.001 (no correlation) |
 
-**Interpretation**: 40% of tested lenses show inconsistent Z_corr signs across bands. If the signal were purely gravitational (achromatic), we'd expect ~100% consistency. The 60% rate suggests a mix of real structure and wavelength-dependent systematics.
+**⚠️ CRITICAL: Band-inconsistent signal**
+
+Only 38% of lenses show the same Z_corr sign across all 4 bands. For a gravitational (achromatic) effect, we expect ~100% consistency. The observed 38% is barely above chance (25% for random signs).
+
+The F150W vs F277W correlation is r ≈ 0, meaning there is **no predictive relationship** between Z_corr in different bands for the same lens. This strongly indicates the signal is wavelength-dependent—consistent with source morphology/PSF systematics rather than gravitational lensing perturbations.
 
 ---
 
-## Top 5 Mundane Explanations (Ranked by Evidence)
+## Top 5 Mundane Explanations (Ranked by Computed Evidence)
 
-1. **Low-mode (m≤3) macro-model mismatch** (evidence score: 0.8)
-   - High Z_corr but Z_pow~0 suggests large-scale smooth residuals, not localized structure
+| Rank | Explanation | Key Evidence | Confidence |
+|------|-------------|--------------|------------|
+| 1 | **Low-mode macro-model mismatch** | ρ(Z_corr, low-m) = 0.937 | Very High |
+| 2 | **Wavelength-dependent source structure** | Band sign consistency = 38% | Very High |
+| 3 | **Model quality variation** | ρ(Z_corr, residual_RMS) = 0.43, p=0.01 | Moderate |
+| 4 | **Score-bin quality gradient** | M25: mean Z=0.89 vs S11: mean Z=-0.14 | Moderate |
+| 5 | **Arc selection bias** | Masks select high-SNR regions | Low (untested) |
 
-2. **Model quality variation** (evidence score: 0.5)
-   - Z_corr correlates with residual RMS, suggesting worse models produce higher Z
+**Strongest remaining mundane explanation**: Low-mode macro-model mismatch (ρ = 0.937)
 
-3. **Selection effects** (evidence score: 0.3)
-   - Arc selection may preferentially select regions with correlated residuals
+The combination of (1) and (2) is definitive: the signal is concentrated in m ≤ 3 modes AND varies with wavelength. Dark substructure would produce high-m power that is wavelength-independent.
 
 ---
 
@@ -145,12 +182,22 @@ The observed Global Z_corr = 3.66 was never exceeded in 20 synthetic realization
 
 For the signal to be attributed to dark substructure perturbations, we would need:
 
-1. **Mass-scale consistency**: Z_corr should correlate with predicted subhalo abundance for each lens
-2. **Spectral signature**: Power should peak at specific angular scales corresponding to subhalo masses
-3. **Band independence**: Same Z_corr in all bands (wavelength-independent)
-4. **Model improvement test**: Z_corr should decrease when using higher-fidelity lens models
-5. **Mock injection recovery**: Injected subhalos should produce similar Z_corr patterns
+| Requirement | Current Status | Needed |
+|-------------|----------------|--------|
+| Band independence | ❌ 38% consistent | ~100% |
+| High-m power | ❌ Low-m dominated (ρ=0.94) | m > 10 power |
+| Spectral signature | ❌ Not detected | Peak at subhalo scales |
+| Model improvement | ❓ Not tested | Z_corr ↓ with better models |
+| Mock recovery | ❓ Not tested | Inject → detect |
 
 ---
 
-*Generated by kill_analysis.py*
+## Data Inventory
+
+All 34 lenses were used. No exclusions.
+
+Bands available per lens: F115W, F150W, F277W, F444W (all 34 have all 4 bands)
+
+---
+
+*Generated by kill_analysis.py with G_resample=1000, G_shift=500*
