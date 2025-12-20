@@ -42,6 +42,11 @@ htmlcov/
 # Data cache (can be re-downloaded)
 data/sparc_cache/
 
+# Large datasets (clone separately)
+data/jwst_cowls/repo/
+data/jwst_cowls/*.json
+data/jwst_cowls/*.py
+
 # OS
 .DS_Store
 Thumbs.db
