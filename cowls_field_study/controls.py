@@ -21,11 +21,11 @@ def shuffle_control(stats: FieldStats, draws: int, lag_max: int, hf_fraction: fl
     from .ring_profile import RingProfile
 
     null_profile = RingProfile(stats.theta_edges, fake_profile, stats.weights, stats.weights, stats.weights)
-    t_corr_null, t_pow_null = draw_null_statistics(
+    nulls = draw_null_statistics(
         null_profile, mode="resample", residual_samples=residual_samples, lag_max=lag_max, hf_fraction=hf_fraction, draws=draws, seed=seed
     )
-    z_corr, _, _ = aggregate_z_scores([0.0], t_corr_null)
-    z_pow, _, _ = aggregate_z_scores([0.0], t_pow_null)
+    z_corr, _, _ = aggregate_z_scores([0.0], nulls.t_corr)
+    z_pow, _, _ = aggregate_z_scores([0.0], nulls.t_pow)
     return z_corr, z_pow
 
 

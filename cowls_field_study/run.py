@@ -15,6 +15,7 @@ from .preprocess import build_arc_mask, load_preprocess, save_preprocess
 from .ring_profile import compute_ring_profile
 from .stats_field import compute_field_stats, zscore
 from .nulls import draw_null_statistics
+from .highpass import HighpassConfig
 from .window import build_window
 from .report import LensResult, ReportBundle, write_report
 
@@ -109,14 +110,31 @@ def process_lens(
     s_theta, _ = build_window(pre.arc_mask, data=data, noise=noise, center=pre.center, theta_bins=theta_bins)
     profile = compute_ring_profile(residual, noise, pre.arc_mask, pre.center, theta_bins, window_weights=s_theta)
 
-    stats = compute_field_stats(profile, lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction)
+    hp_cfg = HighpassConfig(m_cut=cfg.m_cut, m_max=cfg.fourier_m_max)
+    valid_mask = np.isfinite(profile.r_theta) & (profile.coverage > 0)
+
+    stats = compute_field_stats(profile, lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, highpass_config=hp_cfg, highpass_mask=valid_mask)
 
     residual_samples = (residual / (noise + 1e-6))[pre.arc_mask]
-    t_corr_null, t_pow_null = draw_null_statistics(
-        profile, mode=cfg.null_mode, residual_samples=residual_samples, lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=cfg.null_draws
+    nulls = draw_null_statistics(
+        profile,
+        mode=cfg.null_mode,
+        residual_samples=residual_samples,
+        lag_max=cfg.lag_max,
+        hf_fraction=cfg.hf_fraction,
+        draws=cfg.null_draws,
+        highpass_config=hp_cfg,
+        valid_mask=valid_mask,
     )
-    z_corr, _, _ = zscore(stats.t_corr, t_corr_null)
-    z_pow, _, _ = zscore(stats.t_pow, t_pow_null)
+    z_corr, _, _ = zscore(stats.t_corr, nulls.t_corr)
+    z_pow, _, _ = zscore(stats.t_pow, nulls.t_pow)
+
+    z_corr_hp = None
+    z_pow_hp = None
+    if nulls.t_corr_hp is not None and stats.t_corr_hp is not None:
+        z_corr_hp, _, _ = zscore(stats.t_corr_hp, nulls.t_corr_hp)
+    if nulls.t_pow_hp is not None and stats.t_pow_hp is not None:
+        z_pow_hp, _, _ = zscore(stats.t_pow_hp, nulls.t_pow_hp)
 
     result = LensResult(
         lens_id=lens.lens_id,
@@ -127,6 +145,10 @@ def process_lens(
         t_pow=stats.t_pow,
         z_corr=z_corr,
         z_pow=z_pow,
+        t_corr_hp=stats.t_corr_hp,
+        t_pow_hp=stats.t_pow_hp,
+        z_corr_hp=z_corr_hp if z_corr_hp is not None else float("nan"),
+        z_pow_hp=z_pow_hp if z_pow_hp is not None else float("nan"),
     )
     return result, mode_label
 
@@ -140,12 +162,34 @@ def aggregate_results(results: List[LensResult]) -> ReportBundle:
             return 0.0
         return float(np.nanmean([getattr(r, attr) for r in res]))
 
+    def _mean_and_count(res: List[LensResult], attr: str) -> tuple[float, int]:
+        vals = []
+        for r in res:
+            val = getattr(r, attr)
+            if val is None:
+                continue
+            if isinstance(val, (int, float)) and np.isfinite(val):
+                vals.append(val)
+        if not vals:
+            return 0.0, 0
+        return float(np.nanmean(vals)), len(vals)
+
     z_corr_mean = _mean_z(model_results, "z_corr")
     z_pow_mean = _mean_z(model_results, "z_pow")
     z_corr_mean_approx = _mean_z(approx_results, "z_corr")
     z_pow_mean_approx = _mean_z(approx_results, "z_pow")
+    z_corr_hp_mean, _ = _mean_and_count(model_results, "z_corr_hp")
+    z_pow_hp_mean, _ = _mean_and_count(model_results, "z_pow_hp")
+    z_corr_hp_mean_approx, _ = _mean_and_count(approx_results, "z_corr_hp")
+    z_pow_hp_mean_approx, _ = _mean_and_count(approx_results, "z_pow_hp")
+
     z_corr_global = _mean_z(results, "z_corr") * np.sqrt(max(len(results), 1))
     z_pow_global = _mean_z(results, "z_pow") * np.sqrt(max(len(results), 1))
+
+    z_corr_hp_mean_all, z_corr_hp_count = _mean_and_count(results, "z_corr_hp")
+    z_pow_hp_mean_all, z_pow_hp_count = _mean_and_count(results, "z_pow_hp")
+    z_corr_hp_global = z_corr_hp_mean_all * np.sqrt(max(z_corr_hp_count, 1))
+    z_pow_hp_global = z_pow_hp_mean_all * np.sqrt(max(z_pow_hp_count, 1))
 
     return ReportBundle(
         subset_label=",".join(sorted({r.score_bin for r in results})) if results else "none",
@@ -159,6 +203,12 @@ def aggregate_results(results: List[LensResult]) -> ReportBundle:
         z_pow_mean_approx=z_pow_mean_approx,
         z_corr_global=z_corr_global,
         z_pow_global=z_pow_global,
+        z_corr_hp_mean=z_corr_hp_mean,
+        z_pow_hp_mean=z_pow_hp_mean,
+        z_corr_hp_mean_approx=z_corr_hp_mean_approx,
+        z_pow_hp_mean_approx=z_pow_hp_mean_approx,
+        z_corr_hp_global=z_corr_hp_global,
+        z_pow_hp_global=z_pow_hp_global,
         lens_results=results,
     )
 
@@ -178,6 +228,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annulus-width", type=float, default=0.5)
     parser.add_argument("--prefer-model-residuals", action="store_true", help="Prefer explicit model residual products")
     parser.add_argument("--data-root", type=Path, default=FieldStudyConfig().data_root)
+    parser.add_argument("--m-cut", type=int, default=3, help="Low-m cutoff for high-pass filtering")
+    parser.add_argument("--fourier-m-max", type=int, default=None, help="Maximum Fourier order for high-pass fit")
     return parser.parse_args()
 
 
@@ -204,6 +256,8 @@ def main() -> None:
         hf_fraction=args.hf_frac,
         null_mode=args.null_mode,
         null_draws=args.null_draws,
+        m_cut=args.m_cut,
+        fourier_m_max=args.fourier_m_max,
     )
 
     lenses = discover_lenses(cfg.data_root, subset=cfg.subset, score_bins=cfg.score_bins)

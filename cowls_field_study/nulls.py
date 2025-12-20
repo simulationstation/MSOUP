@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 
 from .stats_field import compute_field_stats
 from .ring_profile import RingProfile
+from .highpass import HighpassConfig, mask_ring_profile
+
+
+@dataclass
+class NullDraws:
+    t_corr: np.ndarray
+    t_pow: np.ndarray
+    t_corr_hp: np.ndarray | None = None
+    t_pow_hp: np.ndarray | None = None
 
 
 def circular_shift(profile: RingProfile, rng: np.random.Generator) -> RingProfile:
@@ -56,13 +65,19 @@ def draw_null_statistics(
     hf_fraction: float,
     draws: int = 300,
     seed: int | None = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    highpass_config: HighpassConfig | None = None,
+    valid_mask: np.ndarray | None = None,
+) -> NullDraws:
     """
     Generate null realizations for correlation and power statistics.
     """
     rng = np.random.default_rng(seed)
     t_corr_null = np.zeros(draws, dtype=float)
     t_pow_null = np.zeros(draws, dtype=float)
+    t_corr_hp_null = np.zeros(draws, dtype=float)
+    t_pow_hp_null = np.zeros(draws, dtype=float)
+
+    # use provided masks/configs
 
     for i in range(draws):
         if mode == "shift":
@@ -75,7 +90,24 @@ def draw_null_statistics(
         else:
             null_profile = resample_window(profile, residual_samples, rng)
 
-        stats = compute_field_stats(null_profile, lag_max=lag_max, hf_fraction=hf_fraction)
+        if valid_mask is not None:
+            null_profile = mask_ring_profile(null_profile, valid_mask)
+
+        stats = compute_field_stats(
+            null_profile,
+            lag_max=lag_max,
+            hf_fraction=hf_fraction,
+            highpass_config=highpass_config,
+            highpass_mask=valid_mask,
+        )
         t_corr_null[i] = stats.t_corr
         t_pow_null[i] = stats.t_pow
-    return t_corr_null, t_pow_null
+        if stats.t_corr_hp is not None:
+            t_corr_hp_null[i] = stats.t_corr_hp
+            t_pow_hp_null[i] = stats.t_pow_hp if stats.t_pow_hp is not None else 0.0
+    return NullDraws(
+        t_corr=t_corr_null,
+        t_pow=t_pow_null,
+        t_corr_hp=t_corr_hp_null if highpass_config is not None else None,
+        t_pow_hp=t_pow_hp_null if highpass_config is not None else None,
+    )

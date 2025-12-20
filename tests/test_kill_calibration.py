@@ -21,7 +21,7 @@ def test_shift_null_variance():
     residual_samples = np.ones(10)
 
     ctx = LensNullContext(lens_id="lensA", band="F150W", profile=profile, residual_samples=residual_samples)
-    null_vals, mean, std = prepare_null_baseline(
+    nulls, mean, std, mean_hp, std_hp = prepare_null_baseline(
         profile=profile,
         residual_samples=residual_samples,
         method="shift",
@@ -34,8 +34,10 @@ def test_shift_null_variance():
     )
     ctx.null_means["shift"] = mean
     ctx.null_stds["shift"] = std
+    ctx.null_hp_means["shift"] = mean_hp
+    ctx.null_hp_stds["shift"] = std_hp
 
-    draws = build_global_null_distribution(
+    draws, draws_hp = build_global_null_distribution(
         contexts=[ctx],
         method="shift",
         lag_max=3,
@@ -46,6 +48,7 @@ def test_shift_null_variance():
         seed=2,
     )
     assert np.nanvar(draws) > 0.0
+    assert np.isnan(draws_hp).all() or draws_hp.size == draws.size
 
 
 def test_global_null_empirical_pvalue_monotonicity():
@@ -53,7 +56,7 @@ def test_global_null_empirical_pvalue_monotonicity():
     residual_samples = np.ones(10)
     ctx = LensNullContext(lens_id="lensB", band="F150W", profile=profile, residual_samples=residual_samples)
 
-    null_vals, mean, std = prepare_null_baseline(
+    nulls, mean, std, mean_hp, std_hp = prepare_null_baseline(
         profile=profile,
         residual_samples=residual_samples,
         method="resample",
@@ -66,8 +69,10 @@ def test_global_null_empirical_pvalue_monotonicity():
     )
     ctx.null_means["resample"] = mean
     ctx.null_stds["resample"] = std
+    ctx.null_hp_means["resample"] = mean_hp
+    ctx.null_hp_stds["resample"] = std_hp
 
-    draws = build_global_null_distribution(
+    draws, draws_hp = build_global_null_distribution(
         contexts=[ctx],
         method="resample",
         lag_max=2,
