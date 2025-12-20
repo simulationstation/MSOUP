@@ -38,8 +38,10 @@ def estimate_center(image: np.ndarray, metadata: Optional[dict] = None, window: 
     if metadata:
         for x_key in ("x_center", "xc", "x0"):
             y_key = x_key.replace("x", "y")
-            if x_key in metadata and y_key in metadata:
-                return float(metadata[x_key]), float(metadata[y_key])
+            x_val = metadata.get(x_key)
+            y_val = metadata.get(y_key)
+            if x_val is not None and y_val is not None:
+                return float(x_val), float(y_val)
 
     h, w = image.shape
     cx, cy = w // 2, h // 2
@@ -68,8 +70,9 @@ def estimate_einstein_radius(
     """
     if metadata:
         for key in ("theta_e", "einstein_radius", "r_ein"):
-            if key in metadata:
-                return float(metadata[key])
+            val = metadata.get(key)
+            if val is not None:
+                return float(val)
 
     y, x = np.indices(snr_map.shape)
     r = np.hypot(x - center[0], y - center[1])

@@ -6,16 +6,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Candidate substrings to look for when identifying model products
+# NOTE: Match against stem (filename without extension) to avoid false positives
+# Priority: prefer image-plane products (source_light, lens_light) over source-plane (reconstruction)
 MODEL_KEYWORDS = [
+    "source_light",
+    "lens_light",
+    "model_image",
     "residual",
-    "model",
-    "source",
-    "reconstruction",
     "autolens",
     "pylens",
-    "fit",
-    "lens_model",
-    "pixelized",
 ]
 
 
@@ -32,12 +31,15 @@ def list_band_products(lens_path: Path, band: str) -> Dict[str, Path]:
         if stem == "data":
             products.setdefault("data", candidate)
             continue
-        if "noise" in name:
+        if stem == "noise_map" or stem.endswith("_noise_map"):
             products.setdefault("noise", candidate)
-        if "psf" in name:
+            continue
+        if stem == "psf" or stem.startswith("psf_"):
             products.setdefault("psf", candidate)
+            continue
+        # Check for model products using stem (no .fits extension)
         for kw in MODEL_KEYWORDS:
-            if kw in name:
+            if kw in stem:
                 products.setdefault(f"model:{kw}", candidate)
                 break
     return products
@@ -48,51 +50,38 @@ def choose_noise_psf(products: Dict[str, Path]) -> Tuple[Optional[Path], Optiona
     return products.get("noise"), products.get("psf")
 
 
-def _prioritize_residual(keys: List[str]) -> Optional[str]:
-    ordering = [
-        "pixelized",
-        "source_reconstruction",
-        "reconstruction",
-        "residual",
-        "autolens",
-        "pylens",
-        "model",
-        "fit",
-        "lens_model",
-        "source",
-    ]
-    for token in ordering:
-        for key in keys:
-            if token in key:
-                return key
-    return keys[0] if keys else None
-
-
-def choose_residual_product(products: Dict[str, Path], prefer_model: bool = True) -> Tuple[Optional[Path], str]:
+def choose_residual_product(products: Dict[str, Path], prefer_model: bool = True) -> Tuple[Dict[str, Path], str]:
     """
-    Select the residual path and mode label.
+    Select the best available products for computing residuals.
 
     Returns
     -------
-    residual_path : Path or None
-        Path to the best available residual product.
+    residual_products : Dict[str, Path]
+        Dictionary with 'source_light' and/or 'lens_light' paths if available.
+        If a direct 'residual' product exists, it's returned as {'residual': path}.
     mode_label : str
         ``"model_residual"`` when model products exist, otherwise
         ``"approx_residual"`` signalling downstream approximation.
     """
     model_like = [k for k in products if k.startswith("model:")]
-    residual_like = [k for k in model_like if "residual" in k or "reconstruction" in k or "pixelized" in k]
-    if prefer_model and residual_like:
-        chosen = _prioritize_residual(residual_like)
-        return products[chosen], "model_residual"
 
-    if prefer_model and model_like:
-        chosen = _prioritize_residual(model_like)
-        return products[chosen], "model_residual"
+    # Best case: we have both source_light and lens_light for proper model subtraction
+    source_light_key = next((k for k in model_like if "source_light" in k), None)
+    lens_light_key = next((k for k in model_like if "lens_light" in k), None)
 
-    if "data" in products:
-        model_keys = [k for k in model_like if "model" in k]
-        if model_keys:
-            return products[model_keys[0]], "model_residual"
+    if prefer_model and source_light_key and lens_light_key:
+        return {
+            "source_light": products[source_light_key],
+            "lens_light": products[lens_light_key],
+        }, "model_residual"
 
-    return None, "approx_residual"
+    # Check for direct residual product
+    residual_key = next((k for k in model_like if "residual" in k), None)
+    if prefer_model and residual_key:
+        return {"residual": products[residual_key]}, "model_residual"
+
+    # Fallback: just source_light available
+    if prefer_model and source_light_key:
+        return {"source_light": products[source_light_key]}, "model_residual"
+
+    return {}, "approx_residual"

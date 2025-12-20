@@ -42,14 +42,31 @@ def _load_noise(path: Path | None, data: np.ndarray) -> np.ndarray:
 
 
 def _construct_residual(
-    products: Dict[str, Path], residual_path: Path | None, data: np.ndarray
+    residual_products: Dict[str, Path], data: np.ndarray
 ) -> Tuple[np.ndarray, str]:
-    if residual_path is not None:
-        residual = read_fits(residual_path)[0]
-        return residual, "model_residual"
-    # Approximate residual as data minus smooth background
+    """Construct residual from model products or approximate."""
     from scipy.ndimage import gaussian_filter
 
+    # Direct residual product
+    if "residual" in residual_products:
+        residual = read_fits(residual_products["residual"])[0]
+        return residual, "model_residual"
+
+    # Compute residual by subtracting source_light and lens_light
+    if "source_light" in residual_products or "lens_light" in residual_products:
+        model = np.zeros_like(data)
+        if "source_light" in residual_products:
+            source_light = read_fits(residual_products["source_light"])[0]
+            if source_light.shape == data.shape:
+                model += source_light
+        if "lens_light" in residual_products:
+            lens_light = read_fits(residual_products["lens_light"])[0]
+            if lens_light.shape == data.shape:
+                model += lens_light
+        if np.any(model != 0):
+            return data - model, "model_residual"
+
+    # Approximate residual as data minus smooth background
     background = gaussian_filter(data, sigma=3.0)
     residual = data - background
     return residual, "approx_residual"
@@ -69,8 +86,8 @@ def process_lens(
     noise_path, _ = choose_noise_psf(products)
     noise = _load_noise(noise_path, data)
 
-    residual_path, mode_label = choose_residual_product(products, prefer_model=cfg.prefer_model_residuals)
-    residual, mode_label = _construct_residual(products, residual_path, data) if residual_path is not None else _construct_residual(products, None, data)
+    residual_products, mode_label = choose_residual_product(products, prefer_model=cfg.prefer_model_residuals)
+    residual, mode_label = _construct_residual(residual_products, data)
 
     cache_path = cache_dir / lens.lens_id / f"{band}_preprocess.npz"
     cache = load_preprocess(cache_path)
