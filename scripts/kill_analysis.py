@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -31,6 +32,13 @@ from cowls_field_study.stats_field import compute_field_stats
 from cowls_field_study.nulls import draw_null_statistics
 from cowls_field_study.window import build_window
 from cowls_field_study.config import FieldStudyConfig
+from cowls_field_study.kill_calibration import (
+    LensNullContext,
+    build_global_null_distribution,
+    compute_low_m_ratio,
+    empirical_p_value,
+    prepare_null_baseline,
+)
 
 
 @dataclass
@@ -311,180 +319,183 @@ def section_b_jackknife(lenses: List[LensData], plot_dir: Path) -> Dict:
     }
 
 
-def section_c_null_adequacy(lenses: List[LensData], data_root: Path, cache_dir: Path, plot_dir: Path, K: int = 50) -> Dict:
+def _summarize_exclusions(exclusions: List[Tuple[str, str]]) -> str:
+    if not exclusions:
+        return "None"
+    header = ["Lens", "Reason"]
+    rows = [header] + [[lens, reason] for lens, reason in exclusions]
+    col_widths = [max(len(str(row[i])) for row in rows) for i in range(2)]
+    lines = [" | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row)) for row in rows]
+    return "\n".join(lines)
+
+
+def _enforce_usage(expected: Sequence[str], seen: Sequence[str], exclusions: List[Tuple[str, str]], allow_reduction: bool) -> None:
+    missing = set(expected) - set(seen)
+    if missing and not allow_reduction:
+        table = _summarize_exclusions(exclusions)
+        raise RuntimeError(f"Excluded lenses without allow_reduction flag:\n{table}")
+    if missing:
+        print("\nExcluded lenses:")
+        print(_summarize_exclusions(exclusions))
+
+
+def section_c_null_adequacy(
+    lenses: List[LensData],
+    data_root: Path,
+    cache_dir: Path,
+    plot_dir: Path,
+    cfg: FieldStudyConfig,
+) -> Dict:
     """Section C: Null adequacy / false positive rate tests."""
     print("\n" + "="*60)
     print("SECTION C: Null Adequacy / False Positive Rate Tests")
     print("="*60)
-
-    cfg = FieldStudyConfig()
     theta_bins = np.asarray(cfg.theta_bin_edges())
-
-    # We need to regenerate null distributions for each lens
-    # and compute synthetic Z_corr values
 
     all_lenses_discovered = discover_lenses(data_root, subset=None, score_bins={'M25', 'S10', 'S11', 'S12'})
     lens_map = {l.lens_id: l for l in all_lenses_discovered}
 
-    # Collect synthetic global Z_corr under both null methods
-    synth_global_z_resample = []
-    synth_global_z_shift = []
+    contexts: List[LensNullContext] = []
+    exclusions: List[Tuple[str, str]] = []
 
-    # Storage for per-lens synthetic Z values
-    lens_synth_z_resample = {l.lens_id: [] for l in lenses}
-    lens_synth_z_shift = {l.lens_id: [] for l in lenses}
-
-    print(f"\nRunning {K} null simulations per lens...")
+    per_lens_draws = cfg.per_lens_null_B or cfg.null_draws
 
     for lens_data in lenses:
         lens_entry = lens_map.get(lens_data.lens_id)
         if lens_entry is None:
-            print(f"  Warning: {lens_data.lens_id} not found in data")
+            exclusions.append((lens_data.lens_id, "lens_not_found"))
             continue
 
         band = lens_data.band
         products = list_band_products(lens_entry.path, band)
         data_path = products.get("data")
         if data_path is None:
+            exclusions.append((lens_data.lens_id, "missing_data"))
             continue
 
-        data, header = read_fits(data_path)
-        noise_path, _ = choose_noise_psf(products)
+        try:
+            data, header = read_fits(data_path)
+            noise_path, _ = choose_noise_psf(products)
 
-        if noise_path is None:
-            from cowls_field_study.run import _robust_std
-            noise = np.full_like(data, _robust_std(data))
-        else:
-            noise = read_fits(noise_path)[0]
+            if noise_path is None:
+                from cowls_field_study.run import _robust_std
+                noise = np.full_like(data, _robust_std(data))
+            else:
+                noise = read_fits(noise_path)[0]
 
-        # Load preprocessed data
-        preprocess_path = cache_dir / lens_data.lens_id / f"{band}_preprocess.npz"
-        pre = load_preprocess(preprocess_path)
-        if pre is None:
-            continue
+            preprocess_path = cache_dir / lens_data.lens_id / f"{band}_preprocess.npz"
+            pre = load_preprocess(preprocess_path)
+            if pre is None:
+                exclusions.append((lens_data.lens_id, "missing_preprocess"))
+                continue
 
-        # Construct residual
-        residual_products, mode_label = choose_residual_product(products, prefer_model=True)
-        from cowls_field_study.run import _construct_residual
-        residual, _ = _construct_residual(residual_products, data)
+            residual_products, mode_label = choose_residual_product(products, prefer_model=True)
+            from cowls_field_study.run import _construct_residual
+            residual, _ = _construct_residual(residual_products, data)
 
-        # Get window weights
-        s_theta, _ = build_window(pre.arc_mask, data=data, noise=noise, center=pre.center, theta_bins=theta_bins)
+            s_theta, _ = build_window(pre.arc_mask, data=data, noise=noise, center=pre.center, theta_bins=theta_bins)
+            profile = compute_ring_profile(residual, noise, pre.arc_mask, pre.center, theta_bins, window_weights=s_theta)
 
-        # Compute profile
-        profile = compute_ring_profile(residual, noise, pre.arc_mask, pre.center, theta_bins, window_weights=s_theta)
+            residual_samples = (residual / (noise + 1e-6))[pre.arc_mask]
 
-        # Get residual samples for null generation
-        residual_samples = (residual / (noise + 1e-6))[pre.arc_mask]
-
-        # Generate K synthetic null draws for each method
-        for _ in range(K):
-            # Resample null
-            t_corr_null_resample, _ = draw_null_statistics(
-                profile, mode='resample', residual_samples=residual_samples,
-                lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=1
+            ctx = LensNullContext(
+                lens_id=lens_data.lens_id,
+                band=band,
+                profile=profile,
+                residual_samples=residual_samples,
             )
-            if len(t_corr_null_resample) > 0:
-                # Use the original null distribution to compute Z
-                t_corr_null_full, _ = draw_null_statistics(
-                    profile, mode='resample', residual_samples=residual_samples,
-                    lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=300
+
+            for method in ("resample", "shift"):
+                null_vals, mean, std = prepare_null_baseline(
+                    profile=profile,
+                    residual_samples=residual_samples,
+                    method=method,
+                    lag_max=cfg.lag_max,
+                    hf_fraction=cfg.hf_fraction,
+                    draws=per_lens_draws,
+                    default_draws=FieldStudyConfig().null_draws,
+                    allow_reduction=cfg.allow_reduction,
                 )
-                z_synth = (t_corr_null_resample[0] - np.mean(t_corr_null_full)) / (np.std(t_corr_null_full) + 1e-9)
-                lens_synth_z_resample[lens_data.lens_id].append(z_synth)
+                ctx.null_means[method] = mean
+                ctx.null_stds[method] = std
+            contexts.append(ctx)
+        except Exception as exc:
+            exclusions.append((lens_data.lens_id, f"error:{exc}"))
 
-            # Shift null
-            t_corr_null_shift, _ = draw_null_statistics(
-                profile, mode='shift', residual_samples=residual_samples,
-                lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=1
-            )
-            if len(t_corr_null_shift) > 0:
-                t_corr_null_full, _ = draw_null_statistics(
-                    profile, mode='shift', residual_samples=residual_samples,
-                    lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=300
-                )
-                z_synth = (t_corr_null_shift[0] - np.mean(t_corr_null_full)) / (np.std(t_corr_null_full) + 1e-9)
-                lens_synth_z_shift[lens_data.lens_id].append(z_synth)
+    _enforce_usage([l.lens_id for l in lenses], [c.lens_id for c in contexts], exclusions, cfg.allow_reduction)
 
-    # Compute global Z for each synthetic draw
-    n_lenses = len(lenses)
-    for k in range(K):
-        z_vals_resample = []
-        z_vals_shift = []
-        for lens_data in lenses:
-            if k < len(lens_synth_z_resample[lens_data.lens_id]):
-                z_vals_resample.append(lens_synth_z_resample[lens_data.lens_id][k])
-            if k < len(lens_synth_z_shift[lens_data.lens_id]):
-                z_vals_shift.append(lens_synth_z_shift[lens_data.lens_id][k])
+    observed_global_z = np.mean([l.z_corr for l in lenses]) * np.sqrt(len(lenses))
 
-        if len(z_vals_resample) == n_lenses:
-            global_z = np.mean(z_vals_resample) * np.sqrt(n_lenses)
-            synth_global_z_resample.append(global_z)
-        if len(z_vals_shift) == n_lenses:
-            global_z = np.mean(z_vals_shift) * np.sqrt(n_lenses)
-            synth_global_z_shift.append(global_z)
+    print(f"\nRunning global-null draws: resample={cfg.G_resample_global}, shift={cfg.G_shift_global}")
+    synth_global_z_resample = build_global_null_distribution(
+        contexts=contexts,
+        method="resample",
+        lag_max=cfg.lag_max,
+        hf_fraction=cfg.hf_fraction,
+        draws=cfg.G_resample_global,
+        default_draws=FieldStudyConfig().G_resample_global,
+        allow_reduction=cfg.allow_reduction,
+        max_workers=cfg.max_workers,
+    )
+    synth_global_z_shift = build_global_null_distribution(
+        contexts=contexts,
+        method="shift",
+        lag_max=cfg.lag_max,
+        hf_fraction=cfg.hf_fraction,
+        draws=cfg.G_shift_global,
+        default_draws=FieldStudyConfig().G_shift_global,
+        allow_reduction=cfg.allow_reduction,
+        max_workers=cfg.max_workers,
+    )
 
-    # Compute empirical p-values
-    observed_global_z = np.mean([l.z_corr for l in lenses]) * np.sqrt(n_lenses)
+    p_resample = empirical_p_value(synth_global_z_resample, observed_global_z)
+    p_shift = empirical_p_value(synth_global_z_shift, observed_global_z)
+    count_resample = int(np.sum(synth_global_z_resample >= observed_global_z))
+    count_shift = int(np.sum(synth_global_z_shift >= observed_global_z))
 
-    if len(synth_global_z_resample) > 0:
-        p_resample = np.mean(np.array(synth_global_z_resample) >= observed_global_z)
-        mean_synth_resample = np.mean(synth_global_z_resample)
-        std_synth_resample = np.std(synth_global_z_resample)
-    else:
-        p_resample = np.nan
-        mean_synth_resample = np.nan
-        std_synth_resample = np.nan
+    def _binomial_ci(k: int, n: int, alpha: float = 0.05) -> tuple[float, float]:
+        if n <= 0:
+            return float("nan"), float("nan")
+        lower, upper = stats.beta.interval(1 - alpha, k + 1, n - k + 1)
+        return float(lower), float(upper)
 
-    if len(synth_global_z_shift) > 0:
-        p_shift = np.mean(np.array(synth_global_z_shift) >= observed_global_z)
-        mean_synth_shift = np.mean(synth_global_z_shift)
-        std_synth_shift = np.std(synth_global_z_shift)
-    else:
-        p_shift = np.nan
-        mean_synth_shift = np.nan
-        std_synth_shift = np.nan
+    ci_resample = _binomial_ci(count_resample, len(synth_global_z_resample))
+    ci_shift = _binomial_ci(count_shift, len(synth_global_z_shift))
 
     print(f"\nNull self-test results:")
     print(f"  Observed Global Z_corr: {observed_global_z:.3f}")
     print(f"\n  Resample null ({len(synth_global_z_resample)} simulations):")
-    print(f"    Mean synth Global Z: {mean_synth_resample:.3f}")
-    print(f"    Std synth Global Z: {std_synth_resample:.3f}")
-    print(f"    p(synth >= obs): {p_resample:.4f}")
+    print(f"    Mean synth Global Z: {np.nanmean(synth_global_z_resample):.3f}")
+    print(f"    Std synth Global Z: {np.nanstd(synth_global_z_resample):.3f}")
+    print(f"    p_empirical: {p_resample:.4f}")
     print(f"\n  Shift null ({len(synth_global_z_shift)} simulations):")
-    print(f"    Mean synth Global Z: {mean_synth_shift:.3f}")
-    print(f"    Std synth Global Z: {std_synth_shift:.3f}")
-    print(f"    p(synth >= obs): {p_shift:.4f}")
+    print(f"    Mean synth Global Z: {np.nanmean(synth_global_z_shift):.3f}")
+    print(f"    Std synth Global Z: {np.nanstd(synth_global_z_shift):.3f}")
+    print(f"    p_empirical: {p_shift:.4f}")
 
-    # Warning if p > 0.01
     null_warning = (p_resample > 0.01) or (p_shift > 0.01)
     if null_warning:
         print(f"\n  *** WARNING: p > 0.01 - significance may not be trustworthy! ***")
 
-    # Plot
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    if len(synth_global_z_resample) > 0:
-        ax = axes[0]
-        ax.hist(synth_global_z_resample, bins=20, edgecolor='black', alpha=0.7)
-        ax.axvline(observed_global_z, color='red', linestyle='-', linewidth=2,
-                   label=f'Observed = {observed_global_z:.2f}')
-        ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
-        ax.set_xlabel('Global Z_corr (synthetic)')
-        ax.set_ylabel('Count')
-        ax.set_title(f'Resample Null Self-Test (p={p_resample:.3f})')
-        ax.legend()
+    ax = axes[0]
+    ax.hist(synth_global_z_resample, bins=30, edgecolor='black', alpha=0.7)
+    ax.axvline(observed_global_z, color='red', linestyle='-', linewidth=2, label=f'Observed = {observed_global_z:.2f}')
+    ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Global Z_corr (resample null)')
+    ax.set_ylabel('Count')
+    ax.set_title(f'Resample Null (p={p_resample:.3f})')
+    ax.legend()
 
-    if len(synth_global_z_shift) > 0:
-        ax = axes[1]
-        ax.hist(synth_global_z_shift, bins=20, edgecolor='black', alpha=0.7)
-        ax.axvline(observed_global_z, color='red', linestyle='-', linewidth=2,
-                   label=f'Observed = {observed_global_z:.2f}')
-        ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
-        ax.set_xlabel('Global Z_corr (synthetic)')
-        ax.set_ylabel('Count')
-        ax.set_title(f'Shift Null Self-Test (p={p_shift:.3f})')
-        ax.legend()
+    ax = axes[1]
+    ax.hist(synth_global_z_shift, bins=30, edgecolor='black', alpha=0.7)
+    ax.axvline(observed_global_z, color='red', linestyle='-', linewidth=2, label=f'Observed = {observed_global_z:.2f}')
+    ax.axvline(0, color='gray', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Global Z_corr (shift null)')
+    ax.set_ylabel('Count')
+    ax.set_title(f'Shift Null (p={p_shift:.3f})')
+    ax.legend()
 
     plt.tight_layout()
     plt.savefig(plot_dir / 'c_null_adequacy.png', dpi=150)
@@ -493,14 +504,18 @@ def section_c_null_adequacy(lenses: List[LensData], data_root: Path, cache_dir: 
     return {
         'observed_global_z': float(observed_global_z),
         'n_synth_resample': len(synth_global_z_resample),
-        'mean_synth_resample': float(mean_synth_resample) if not np.isnan(mean_synth_resample) else None,
-        'std_synth_resample': float(std_synth_resample) if not np.isnan(std_synth_resample) else None,
-        'p_resample': float(p_resample) if not np.isnan(p_resample) else None,
+        'mean_synth_resample': float(np.nanmean(synth_global_z_resample)),
+        'std_synth_resample': float(np.nanstd(synth_global_z_resample)),
+        'p_resample': float(p_resample),
+        'p_resample_ci': ci_resample,
         'n_synth_shift': len(synth_global_z_shift),
-        'mean_synth_shift': float(mean_synth_shift) if not np.isnan(mean_synth_shift) else None,
-        'std_synth_shift': float(std_synth_shift) if not np.isnan(std_synth_shift) else None,
-        'p_shift': float(p_shift) if not np.isnan(p_shift) else None,
+        'mean_synth_shift': float(np.nanmean(synth_global_z_shift)),
+        'std_synth_shift': float(np.nanstd(synth_global_z_shift)),
+        'p_shift': float(p_shift),
+        'p_shift_ci': ci_shift,
         'null_warning': null_warning,
+        'n_lenses_used': len(contexts),
+        'excluded_lenses': exclusions,
     }
 
 
@@ -678,13 +693,12 @@ def section_d_artifact_proxies(lenses: List[LensData], data_root: Path, cache_di
     }
 
 
-def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache_dir: Path, plot_dir: Path) -> Dict:
+def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache_dir: Path, plot_dir: Path, cfg: FieldStudyConfig) -> Dict:
     """Section E: Frequency-structure consistency."""
     print("\n" + "="*60)
     print("SECTION E: Frequency-Structure Consistency")
     print("="*60)
 
-    cfg = FieldStudyConfig()
     theta_bins = np.asarray(cfg.theta_bin_edges())
 
     all_lenses_discovered = discover_lenses(data_root, subset=None, score_bins={'M25', 'S10', 'S11', 'S12'})
@@ -693,6 +707,7 @@ def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache
     # Compute low-m dominance for each lens
     low_m_dominance = []
     profiles_data = []
+    exclusions: List[Tuple[str, str]] = []
 
     for lens_data in lenses:
         lens_entry = lens_map.get(lens_data.lens_id)
@@ -707,65 +722,62 @@ def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache
             low_m_dominance.append(np.nan)
             continue
 
-        data, header = read_fits(data_path)
-        noise_path, _ = choose_noise_psf(products)
+        try:
+            data, header = read_fits(data_path)
+            noise_path, _ = choose_noise_psf(products)
 
-        if noise_path is None:
-            from cowls_field_study.run import _robust_std
-            noise = np.full_like(data, _robust_std(data))
-        else:
-            noise = read_fits(noise_path)[0]
+            if noise_path is None:
+                from cowls_field_study.run import _robust_std
+                noise = np.full_like(data, _robust_std(data))
+            else:
+                noise = read_fits(noise_path)[0]
 
-        preprocess_path = cache_dir / lens_data.lens_id / f"{band}_preprocess.npz"
-        pre = load_preprocess(preprocess_path)
-        if pre is None:
-            low_m_dominance.append(np.nan)
-            continue
+            preprocess_path = cache_dir / lens_data.lens_id / f"{band}_preprocess.npz"
+            pre = load_preprocess(preprocess_path)
+            if pre is None:
+                exclusions.append((lens_data.lens_id, "missing_preprocess"))
+                low_m_dominance.append(np.nan)
+                continue
 
-        residual_products, _ = choose_residual_product(products, prefer_model=True)
-        from cowls_field_study.run import _construct_residual
-        residual, _ = _construct_residual(residual_products, data)
+            residual_products, _ = choose_residual_product(products, prefer_model=True)
+            from cowls_field_study.run import _construct_residual
+            residual, _ = _construct_residual(residual_products, data)
 
-        s_theta, _ = build_window(pre.arc_mask, data=data, noise=noise, center=pre.center, theta_bins=theta_bins)
-        profile = compute_ring_profile(residual, noise, pre.arc_mask, pre.center, theta_bins, window_weights=s_theta)
+            s_theta, _ = build_window(pre.arc_mask, data=data, noise=noise, center=pre.center, theta_bins=theta_bins)
+            profile = compute_ring_profile(residual, noise, pre.arc_mask, pre.center, theta_bins, window_weights=s_theta)
 
-        # Compute FFT power spectrum
-        r_theta = profile.r_theta
-        if len(r_theta) > 0:
-            fft = np.fft.fft(r_theta)
-            power = np.abs(fft)**2
-
-            # Low-m (m <= 3) vs total power
-            n_bins = len(power)
-            low_m_power = np.sum(power[1:4])  # m=1,2,3
-            total_power = np.sum(power[1:n_bins//2])  # exclude DC and Nyquist
-
-            low_m_ratio = low_m_power / (total_power + 1e-9)
+            low_m_ratio = compute_low_m_ratio(profile)
             low_m_dominance.append(low_m_ratio)
+
+            fft = np.fft.fft(profile.r_theta) if len(profile.r_theta) else np.array([])
+            power = np.abs(fft) ** 2 if fft.size else np.array([])
 
             profiles_data.append({
                 'lens_id': lens_data.lens_id,
                 'z_corr': lens_data.z_corr,
                 'z_pow': lens_data.z_pow,
-                'r_theta': r_theta,
+                'r_theta': profile.r_theta,
                 'power': power,
                 'low_m_ratio': low_m_ratio,
             })
-        else:
+        except Exception as exc:
+            exclusions.append((lens_data.lens_id, f"error:{exc}"))
             low_m_dominance.append(np.nan)
 
     low_m_dominance = np.array(low_m_dominance)
     z_corr = np.array([l.z_corr for l in lenses])
     z_pow = np.array([l.z_pow for l in lenses])
 
-    # Correlation of low-m dominance with Z_corr
     valid = ~np.isnan(low_m_dominance)
     if np.sum(valid) > 3:
         r_low_m, p_low_m = stats.spearmanr(z_corr[valid], low_m_dominance[valid])
+        pearson_r, pearson_p = stats.pearsonr(z_corr[valid], low_m_dominance[valid])
         print(f"\nLow-m (m<=3) dominance vs Z_corr:")
         print(f"  Spearman ρ = {r_low_m:.3f} (p = {p_low_m:.4f})")
+        print(f"  Pearson r = {pearson_r:.3f} (p = {pearson_p:.4f})")
     else:
         r_low_m, p_low_m = np.nan, np.nan
+        pearson_r, pearson_p = np.nan, np.nan
 
     # Identify high Z_corr / negative Z_pow lenses
     high_corr_low_pow = [(l, lmd) for l, lmd in zip(lenses, low_m_dominance)
@@ -774,6 +786,10 @@ def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache
     print(f"\nLenses with Z_corr > 0.9 and Z_pow < 0:")
     for l, lmd in high_corr_low_pow[:5]:
         print(f"  {l.lens_id}: Z_corr={l.z_corr:.2f}, Z_pow={l.z_pow:.2f}, low_m_ratio={lmd:.3f}")
+
+    if exclusions:
+        print("\nLow-m computation exclusions:")
+        print(_summarize_exclusions(exclusions))
 
     # Plot
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -828,12 +844,15 @@ def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache
     return {
         'low_m_corr_rho': float(r_low_m) if not np.isnan(r_low_m) else None,
         'low_m_corr_p': float(p_low_m) if not np.isnan(p_low_m) else None,
+        'low_m_corr_pearson': float(pearson_r) if not np.isnan(pearson_r) else None,
+        'low_m_corr_pearson_p': float(pearson_p) if not np.isnan(pearson_p) else None,
         'mean_low_m_ratio': float(np.nanmean(low_m_dominance)),
         'n_high_corr_neg_pow': len(high_corr_low_pow),
+        'excluded': exclusions,
     }
 
 
-def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_dir: Path, plot_dir: Path) -> Dict:
+def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_dir: Path, plot_dir: Path, cfg: FieldStudyConfig) -> Dict:
     """Section F: Band-consistency checks."""
     print("\n" + "="*60)
     print("SECTION F: Band-Consistency Checks")
@@ -842,7 +861,6 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
     all_lenses_discovered = discover_lenses(data_root, subset=None, score_bins={'M25', 'S10', 'S11', 'S12'})
     lens_map = {l.lens_id: l for l in all_lenses_discovered}
 
-    # Check which lenses have multiple bands
     multi_band_lenses = []
     for lens_data in lenses:
         lens_entry = lens_map.get(lens_data.lens_id)
@@ -857,13 +875,13 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
         print("  No multi-band lenses available for consistency check.")
         return {'n_multi_band': 0, 'band_consistency': None}
 
-    # For each multi-band lens, compute Z_corr in each band
     band_results = []
 
-    cfg = FieldStudyConfig()
     theta_bins = np.asarray(cfg.theta_bin_edges())
 
-    for lens_data, lens_entry in multi_band_lenses[:5]:  # Limit to 5 for speed
+    exclusions: List[Tuple[str, str]] = []
+
+    for lens_data, lens_entry in multi_band_lenses:
         print(f"\n  {lens_data.lens_id}: bands = {lens_entry.bands}")
 
         lens_band_z = {'lens_id': lens_data.lens_id}
@@ -872,6 +890,7 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
             products = list_band_products(lens_entry.path, band)
             data_path = products.get("data")
             if data_path is None:
+                exclusions.append((lens_data.lens_id, f"{band}:missing_data"))
                 continue
 
             try:
@@ -884,12 +903,10 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
                 else:
                     noise = read_fits(noise_path)[0]
 
-                # Check for preprocess cache
                 preprocess_path = cache_dir / lens_data.lens_id / f"{band}_preprocess.npz"
                 pre = load_preprocess(preprocess_path)
 
                 if pre is None:
-                    # Build it
                     meta = {k.lower(): header.get(k) for k in ("X_CENTER", "Y_CENTER", "THETA_E", "R_EIN")} if header else {}
                     pre = build_arc_mask(
                         image=data,
@@ -909,11 +926,10 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
 
                 field_stats = compute_field_stats(profile, lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction)
 
-                # Get null distribution
                 residual_samples = (residual / (noise + 1e-6))[pre.arc_mask]
                 t_corr_null, t_pow_null = draw_null_statistics(
                     profile, mode='both', residual_samples=residual_samples,
-                    lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=200
+                    lag_max=cfg.lag_max, hf_fraction=cfg.hf_fraction, draws=cfg.null_draws
                 )
 
                 z_corr = (field_stats.t_corr - np.mean(t_corr_null)) / (np.std(t_corr_null) + 1e-9)
@@ -923,32 +939,53 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
                 print(f"    {band}: Z_corr={z_corr:.2f}, Z_pow={z_pow:.2f}")
 
             except Exception as e:
-                print(f"    {band}: Error - {e}")
+                exclusions.append((lens_data.lens_id, f"{band}:error:{e}"))
 
-        if len(lens_band_z) > 2:  # lens_id + at least 2 bands
+        if len(lens_band_z) > 2:
             band_results.append(lens_band_z)
 
-    # Analyze consistency
-    if len(band_results) > 0:
-        # Check sign consistency
-        sign_consistent = 0
-        for br in band_results:
-            bands = [k for k in br if k != 'lens_id']
-            if len(bands) >= 2:
-                signs = [np.sign(br[b]['z_corr']) for b in bands]
-                if all(s == signs[0] for s in signs):
-                    sign_consistent += 1
+    sign_consistent = 0
+    per_lens_variance = []
+    f150 = []
+    f277 = []
 
-        consistency_frac = sign_consistent / len(band_results)
-        print(f"\n  Sign consistency across bands: {sign_consistent}/{len(band_results)} = {consistency_frac:.2f}")
+    for br in band_results:
+        bands = [k for k in br if k != 'lens_id']
+        z_vals = [br[b]['z_corr'] for b in bands]
+        signs = [np.sign(v) for v in z_vals]
+        if len(set(signs)) == 1:
+            sign_consistent += 1
+        per_lens_variance.append(np.var(z_vals))
+        if 'F150W' in br and 'F277W' in br:
+            f150.append(br['F150W']['z_corr'])
+            f277.append(br['F277W']['z_corr'])
+
+    consistency_frac = sign_consistent / len(band_results) if band_results else float('nan')
+    band_var_mean = float(np.nanmean(per_lens_variance)) if per_lens_variance else float('nan')
+    if len(f150) > 1:
+        try:
+            band_corr = stats.pearsonr(f150, f277)[0]
+        except ValueError:
+            band_corr = float('nan')
     else:
-        consistency_frac = None
+        band_corr = float('nan')
+
+    print(f"\n  Sign consistency across bands: {sign_consistent}/{len(band_results)} = {consistency_frac:.2f}")
+    print(f"  Mean per-lens Z_corr variance across bands: {band_var_mean:.3f}")
+    if not np.isnan(band_corr):
+        print(f"  F150W vs F277W correlation: {band_corr:.3f}")
+    if exclusions:
+        print("\nBand consistency exclusions:")
+        print(_summarize_exclusions(exclusions))
 
     return {
         'n_multi_band': len(multi_band_lenses),
         'n_tested': len(band_results),
-        'band_consistency': float(consistency_frac) if consistency_frac is not None else None,
-        'band_results': band_results[:5],  # Keep first 5 for summary
+        'band_consistency': float(consistency_frac) if not np.isnan(consistency_frac) else None,
+        'band_variance_mean': band_var_mean,
+        'band_corr_f150_f277': band_corr if not np.isnan(band_corr) else None,
+        'band_results': band_results,
+        'excluded': exclusions,
     }
 
 
@@ -1081,20 +1118,39 @@ def write_kill_report(results: Dict, plot_dir: Path, output_path: Path):
         "",
         "## Section C: Null Adequacy Tests",
         "",
-    ])
+    ]) 
 
     sec_c = results.get('section_c', {})
     if sec_c:
         lines.extend([
-            f"| Null Method | N Simulations | Mean Synth Z | p-value |",
-            f"|-------------|---------------|--------------|---------|",
-            f"| Resample | {sec_c.get('n_synth_resample', 'N/A')} | {sec_c.get('mean_synth_resample', 'N/A')} | {sec_c.get('p_resample', 'N/A')} |",
-            f"| Shift | {sec_c.get('n_synth_shift', 'N/A')} | {sec_c.get('mean_synth_shift', 'N/A')} | {sec_c.get('p_shift', 'N/A')} |",
+            f"| Null Method | G Used | Mean Synth Z | Std Synth Z | p_emp |",
+            f"|-------------|--------|--------------|-------------|-------|",
+            f"| Resample | {sec_c.get('n_synth_resample', 'N/A')} | {sec_c.get('mean_synth_resample', 'N/A')} | {sec_c.get('std_synth_resample', 'N/A')} | {sec_c.get('p_resample', 'N/A')} |",
+            f"| Shift | {sec_c.get('n_synth_shift', 'N/A')} | {sec_c.get('mean_synth_shift', 'N/A')} | {sec_c.get('std_synth_shift', 'N/A')} | {sec_c.get('p_shift', 'N/A')} |",
+            "",
+            f"- Resample CI (95%): {sec_c.get('p_resample_ci')}",
+            f"- Shift CI (95%): {sec_c.get('p_shift_ci')}",
             "",
             f"**Null Warning: {'YES - significance may not be trustworthy!' if sec_c.get('null_warning') else 'NO - nulls are well-calibrated'}**",
             "",
+            f"- Observed Z_corr: {sec_c.get('observed_global_z', 'N/A')}",
+            f"- Lenses used: {sec_c.get('n_lenses_used', 'N/A')}",
+            "",
+            "Histograms:",
+            "",
             "![Null Adequacy](kill_plots/c_null_adequacy.png)",
         ])
+        excluded = sec_c.get('excluded_lenses') or []
+        if excluded:
+            lines.extend([
+                "",
+                "Excluded lenses (null adequacy):",
+                "",
+                "Lens | Reason",
+                "--- | ---",
+            ])
+            for lens_id, reason in excluded:
+                lines.append(f"{lens_id} | {reason}")
 
     lines.extend([
         "",
@@ -1124,11 +1180,14 @@ def write_kill_report(results: Dict, plot_dir: Path, output_path: Path):
 
     sec_e = results.get('section_e', {})
     low_m_rho_val = sec_e.get('low_m_corr_rho')
+    low_m_pearson_val = sec_e.get('low_m_corr_pearson')
     mean_low_m_val = sec_e.get('mean_low_m_ratio')
     low_m_str = f"{low_m_rho_val:.3f}" if low_m_rho_val is not None else "N/A"
+    low_m_pearson_str = f"{low_m_pearson_val:.3f}" if low_m_pearson_val is not None else "N/A"
     mean_low_m_str = f"{mean_low_m_val:.3f}" if (mean_low_m_val is not None and not np.isnan(mean_low_m_val)) else "N/A"
     lines.extend([
         f"- Low-m (m≤3) dominance correlation with Z_corr: ρ = {low_m_str}",
+        f"- Low-m (m≤3) Pearson correlation with Z_corr: r = {low_m_pearson_str}",
         f"- Mean low-m ratio: {mean_low_m_str}",
         f"- Lenses with high Z_corr but negative Z_pow: {sec_e.get('n_high_corr_neg_pow', 0)}",
         "",
@@ -1145,6 +1204,8 @@ def write_kill_report(results: Dict, plot_dir: Path, output_path: Path):
         f"- Multi-band lenses available: {sec_f.get('n_multi_band', 0)}",
         f"- Lenses tested: {sec_f.get('n_tested', 0)}",
         f"- Sign consistency: {sec_f.get('band_consistency', 'N/A')}",
+        f"- Mean per-lens band variance: {sec_f.get('band_variance_mean', 'N/A')}",
+        f"- F150W vs F277W correlation: {sec_f.get('band_corr_f150_f277', 'N/A')}",
         "",
         "---",
         "",
@@ -1203,6 +1264,20 @@ def write_kill_report(results: Dict, plot_dir: Path, output_path: Path):
     print(f"\nWrote KILL_REPORT.md to {output_path}")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the COWLS kill analysis pipeline.")
+    parser.add_argument("--report-path", type=Path, default=Path("results/cowls_field_study/full_M25_S10-S12/report.md"))
+    parser.add_argument("--data-root", type=Path, default=FieldStudyConfig().data_root)
+    parser.add_argument("--cache-dir", type=Path, default=Path("results/cowls_field_study/full_M25_S10-S12/cache"))
+    parser.add_argument("--results-dir", type=Path, default=Path("results/cowls_field_study"))
+    parser.add_argument("--G-resample-global", type=int, default=FieldStudyConfig().G_resample_global)
+    parser.add_argument("--G-shift-global", type=int, default=FieldStudyConfig().G_shift_global)
+    parser.add_argument("--null-B", dest="null_draws", type=int, default=FieldStudyConfig().null_draws)
+    parser.add_argument("--allow-reduction", action="store_true", help="Allow using fewer draws or lenses without error.")
+    parser.add_argument("--max-workers", type=int, default=None, help="Max workers for parallel null draws.")
+    return parser.parse_args()
+
+
 def write_kill_summary(results: Dict, output_path: Path):
     """Write the kill_summary.json."""
     summary = {
@@ -1211,6 +1286,11 @@ def write_kill_summary(results: Dict, output_path: Path):
         'n_lenses': results['section_a']['n_lenses'],
         'empirical_p_null_resample': results.get('section_c', {}).get('p_resample'),
         'empirical_p_null_shift': results.get('section_c', {}).get('p_shift'),
+        'p_emp_resample': results.get('section_c', {}).get('p_resample'),
+        'p_emp_shift': results.get('section_c', {}).get('p_shift'),
+        'G_resample': results.get('section_c', {}).get('n_synth_resample'),
+        'G_shift': results.get('section_c', {}).get('n_synth_shift'),
+        'n_lenses_used': results.get('section_c', {}).get('n_lenses_used'),
         'leave_one_out_min': results['section_b']['loo_min'],
         'leave_one_out_median': results['section_b']['loo_median'],
         'leave_one_out_max': results['section_b']['loo_max'],
@@ -1220,8 +1300,14 @@ def write_kill_summary(results: Dict, output_path: Path):
         'strongest_proxy': results.get('section_d', {}).get('strongest_proxy'),
         'strongest_proxy_rho': results.get('section_d', {}).get('strongest_rho'),
         'low_m_dominance_rho': results.get('section_e', {}).get('low_m_corr_rho'),
+        'low_m_dominance_p': results.get('section_e', {}).get('low_m_corr_p'),
+        'low_m_dominance_pearson_r': results.get('section_e', {}).get('low_m_corr_pearson'),
+        'low_m_dominance_pearson_p': results.get('section_e', {}).get('low_m_corr_pearson_p'),
         'jackknife_mean': results['section_b']['jackknife_mean'],
         'jackknife_se': results['section_b']['jackknife_se'],
+        'band_sign_consistency': results.get('section_f', {}).get('band_consistency'),
+        'band_variance_mean': results.get('section_f', {}).get('band_variance_mean'),
+        'band_corr_f150_f277': results.get('section_f', {}).get('band_corr_f150_f277'),
     }
 
     output_path.write_text(json.dumps(summary, indent=2))
@@ -1229,12 +1315,23 @@ def write_kill_summary(results: Dict, output_path: Path):
 
 
 def main():
+    args = parse_args()
+    cfg = FieldStudyConfig(
+        data_root=args.data_root,
+        results_root=args.results_dir,
+        null_draws=args.null_draws,
+        G_resample_global=args.G_resample_global,
+        G_shift_global=args.G_shift_global,
+        allow_reduction=args.allow_reduction,
+        max_workers=args.max_workers,
+        per_lens_null_B=args.null_draws,
+    )
     # Paths
     project_root = Path(__file__).parent.parent
-    report_path = project_root / "results/cowls_field_study/full_M25_S10-S12/report.md"
-    data_root = project_root / "data/jwst_cowls/repo"
-    cache_dir = project_root / "results/cowls_field_study/full_M25_S10-S12/cache"
-    output_dir = project_root / "results/cowls_field_study"
+    report_path = project_root / args.report_path
+    data_root = project_root / args.data_root
+    cache_dir = project_root / args.cache_dir
+    output_dir = project_root / args.results_dir
     plot_dir = output_dir / "kill_plots"
 
     # Create directories
@@ -1254,16 +1351,16 @@ def main():
     results['section_b'] = section_b_jackknife(lenses, plot_dir)
 
     # Section C (computationally intensive - reduce K if needed)
-    results['section_c'] = section_c_null_adequacy(lenses, data_root, cache_dir, plot_dir, K=20)
+    results['section_c'] = section_c_null_adequacy(lenses, data_root, cache_dir, plot_dir, cfg)
 
     # Section D
     results['section_d'] = section_d_artifact_proxies(lenses, data_root, cache_dir, plot_dir)
 
     # Section E
-    results['section_e'] = section_e_frequency_structure(lenses, data_root, cache_dir, plot_dir)
+    results['section_e'] = section_e_frequency_structure(lenses, data_root, cache_dir, plot_dir, cfg)
 
     # Section F
-    results['section_f'] = section_f_band_consistency(lenses, data_root, cache_dir, plot_dir)
+    results['section_f'] = section_f_band_consistency(lenses, data_root, cache_dir, plot_dir, cfg)
 
     # Write outputs
     write_kill_report(results, plot_dir, output_dir / "KILL_REPORT.md")
