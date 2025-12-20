@@ -32,9 +32,9 @@ def test_null_generation_near_zero():
     theta_bins = np.array([0, 180, 360])
     base_profile = RingProfile(theta_edges=theta_bins, r_theta=np.zeros(2), uncertainty=np.zeros(2), coverage=np.ones(2), weights=np.ones(2))
     residual_samples = np.zeros(10)
-    t_corr_null, t_pow_null = draw_null_statistics(base_profile, mode="shift", residual_samples=residual_samples, lag_max=3, hf_fraction=0.5, draws=50, seed=1)
-    z_corr, _, _ = zscore(0.0, t_corr_null)
-    z_pow, _, _ = zscore(0.0, t_pow_null)
+    nulls = draw_null_statistics(base_profile, mode="shift", residual_samples=residual_samples, lag_max=3, hf_fraction=0.5, draws=50, seed=1)
+    z_corr, _, _ = zscore(0.0, nulls.t_corr)
+    z_pow, _, _ = zscore(0.0, nulls.t_pow)
     assert abs(z_corr) < 1.0
     assert abs(z_pow) < 1.0
 

@@ -41,6 +41,10 @@ class FieldStudyConfig:
     allow_reduction: bool = False
     max_workers: int | None = None
     per_lens_null_B: int | None = None
+    m_cut: int = 3
+    fourier_m_max: int | None = None
+    band_common_mask: str | None = None
+    band_pair: str = "F150W,F277W"
 
     def theta_bin_edges(self) -> List[float]:
         """Return monotonically increasing theta bin edges in degrees."""

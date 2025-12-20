@@ -19,6 +19,10 @@ class LensResult:
     t_pow: float
     z_corr: float
     z_pow: float
+    t_corr_hp: float | None = None
+    t_pow_hp: float | None = None
+    z_corr_hp: float | None = None
+    z_pow_hp: float | None = None
 
 
 @dataclass
@@ -34,6 +38,12 @@ class ReportBundle:
     z_pow_mean_approx: float
     z_corr_global: float
     z_pow_global: float
+    z_corr_hp_mean: float
+    z_pow_hp_mean: float
+    z_corr_hp_mean_approx: float
+    z_pow_hp_mean_approx: float
+    z_corr_hp_global: float
+    z_pow_hp_global: float
     lens_results: List[LensResult] = field(default_factory=list)
 
 
@@ -64,6 +74,12 @@ def write_report(out_dir: Path, bundle: ReportBundle) -> Path:
         f"Mean Z_pow  (approx): {bundle.z_pow_mean_approx:.3f}",
         f"Global Z_corr: {bundle.z_corr_global:.3f}",
         f"Global Z_pow: {bundle.z_pow_global:.3f}",
+        f"Mean Z_corr_hp (model): {bundle.z_corr_hp_mean:.3f}",
+        f"Mean Z_pow_hp  (model): {bundle.z_pow_hp_mean:.3f}",
+        f"Mean Z_corr_hp (approx): {bundle.z_corr_hp_mean_approx:.3f}",
+        f"Mean Z_pow_hp  (approx): {bundle.z_pow_hp_mean_approx:.3f}",
+        f"Global Z_corr_hp: {bundle.z_corr_hp_global:.3f}",
+        f"Global Z_pow_hp: {bundle.z_pow_hp_global:.3f}",
         "",
         "## Per-lens summary",
     ]
@@ -72,7 +88,11 @@ def write_report(out_dir: Path, bundle: ReportBundle) -> Path:
         lines.append(
             f"- {res.lens_id} ({res.band}, {res.score_bin}, {res.mode}): "
             f"T_corr={res.t_corr:.3f}, T_pow={res.t_pow:.3f}, "
-            f"Z_corr={res.z_corr:.2f}, Z_pow={res.z_pow:.2f}"
+            f"Z_corr={res.z_corr:.2f}, Z_pow={res.z_pow:.2f}, "
+            f"T_corr_hp={res.t_corr_hp if res.t_corr_hp is not None else float('nan'):.3f}, "
+            f"T_pow_hp={res.t_pow_hp if res.t_pow_hp is not None else float('nan'):.3f}, "
+            f"Z_corr_hp={res.z_corr_hp if res.z_corr_hp is not None else float('nan'):.2f}, "
+            f"Z_pow_hp={res.z_pow_hp if res.z_pow_hp is not None else float('nan'):.2f}"
         )
 
     report_path.write_text("\n".join(lines))

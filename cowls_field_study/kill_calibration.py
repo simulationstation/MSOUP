@@ -10,9 +10,10 @@ from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
 
-from .nulls import circular_shift, resample_window, draw_null_statistics
+from .nulls import circular_shift, resample_window, draw_null_statistics, NullDraws
 from .ring_profile import RingProfile
 from .stats_field import compute_field_stats
+from .highpass import HighpassConfig, mask_ring_profile
 
 
 def _enforce_draw_floor(requested: int, default: int, allow_reduction: bool, name: str) -> int:
@@ -94,6 +95,9 @@ class LensNullContext:
     residual_samples: np.ndarray
     null_means: Dict[str, float] = field(default_factory=dict)
     null_stds: Dict[str, float] = field(default_factory=dict)
+    null_hp_means: Dict[str, float] = field(default_factory=dict)
+    null_hp_stds: Dict[str, float] = field(default_factory=dict)
+    valid_mask: np.ndarray | None = None
 
 
 def prepare_null_baseline(
@@ -105,23 +109,29 @@ def prepare_null_baseline(
     draws: int,
     default_draws: int,
     allow_reduction: bool,
+    highpass_config: HighpassConfig | None = None,
+    valid_mask: np.ndarray | None = None,
     seed: int | None = None,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[NullDraws, float, float, float | None, float | None]:
     """Compute the per-lens baseline null distribution."""
 
     draws = _enforce_draw_floor(draws, default_draws, allow_reduction, f"{method} per-lens null")
-    t_corr_null, _ = draw_null_statistics(
+    nulls = draw_null_statistics(
         profile,
         mode=method,
         residual_samples=residual_samples,
         lag_max=lag_max,
         hf_fraction=hf_fraction,
         draws=draws,
+        highpass_config=highpass_config,
+        valid_mask=valid_mask,
         seed=seed,
     )
-    mean = float(np.nanmean(t_corr_null)) if t_corr_null.size else 0.0
-    std = float(np.nanstd(t_corr_null) + 1e-9) if t_corr_null.size else 1.0
-    return t_corr_null, mean, std
+    mean = float(np.nanmean(nulls.t_corr)) if nulls.t_corr.size else 0.0
+    std = float(np.nanstd(nulls.t_corr) + 1e-9) if nulls.t_corr.size else 1.0
+    mean_hp = float(np.nanmean(nulls.t_corr_hp)) if nulls.t_corr_hp is not None and nulls.t_corr_hp.size else None
+    std_hp = float(np.nanstd(nulls.t_corr_hp) + 1e-9) if nulls.t_corr_hp is not None and nulls.t_corr_hp.size else None
+    return nulls, mean, std, mean_hp, std_hp
 
 
 def _single_global_null_draw(
@@ -129,10 +139,12 @@ def _single_global_null_draw(
     method: str,
     lag_max: int,
     hf_fraction: float,
+    highpass_config: HighpassConfig | None,
     seed: int | None,
-) -> float:
+) -> tuple[float, float | None]:
     rng = np.random.default_rng(seed)
     z_values: List[float] = []
+    z_hp_values: List[float] = []
 
     for ctx in contexts:
         lens_rng = np.random.default_rng(rng.integers(0, 2**32 - 1))
@@ -141,15 +153,28 @@ def _single_global_null_draw(
         else:
             null_profile = resample_window(ctx.profile, ctx.residual_samples, lens_rng)
 
-        stats = compute_field_stats(null_profile, lag_max=lag_max, hf_fraction=hf_fraction)
+        if ctx.valid_mask is not None:
+            null_profile = mask_ring_profile(null_profile, ctx.valid_mask)
+
+        stats = compute_field_stats(
+            null_profile,
+            lag_max=lag_max,
+            hf_fraction=hf_fraction,
+            highpass_config=highpass_config,
+            highpass_mask=ctx.valid_mask,
+        )
         mean = ctx.null_means[method]
         std = ctx.null_stds[method]
         z_values.append((stats.t_corr - mean) / (std + 1e-9))
+        if ctx.null_hp_means.get(method) is not None and stats.t_corr_hp is not None:
+            z_hp_values.append((stats.t_corr_hp - ctx.null_hp_means[method]) / (ctx.null_hp_stds[method] + 1e-9))
 
     z_values = np.asarray(z_values, dtype=float)
-    if z_values.size == 0:
-        return float("nan")
-    return float(np.nanmean(z_values) * math.sqrt(z_values.size))
+    base = float(np.nanmean(z_values) * math.sqrt(z_values.size)) if z_values.size else float("nan")
+
+    z_hp_values = np.asarray(z_hp_values, dtype=float)
+    hp_val = float(np.nanmean(z_hp_values) * math.sqrt(z_hp_values.size)) if z_hp_values.size else float("nan")
+    return base, hp_val
 
 
 def build_global_null_distribution(
@@ -162,21 +187,28 @@ def build_global_null_distribution(
     allow_reduction: bool,
     max_workers: int | None = None,
     seed: int | None = None,
-) -> np.ndarray:
+    highpass_config: HighpassConfig | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Generate global-null draws of Z_corr across lenses."""
 
     draws = _enforce_draw_floor(draws, default_draws, allow_reduction, f"{method} global-null")
     seeds = np.random.default_rng(seed).integers(0, 2**32 - 1, size=draws)
-    worker = lambda s: _single_global_null_draw(contexts, method, lag_max, hf_fraction, int(s))
+    worker = lambda s: _single_global_null_draw(contexts, method, lag_max, hf_fraction, highpass_config, int(s))
 
     if max_workers is None:
         max_workers = os.cpu_count() or 1
 
+    hp_samples: list[float] = []
+    base_samples: list[float] = []
     if max_workers > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            samples = list(executor.map(worker, seeds))
+            for base, hp in executor.map(worker, seeds):
+                base_samples.append(base)
+                hp_samples.append(hp)
     else:
-        samples = [worker(int(s)) for s in seeds]
+        for s in seeds:
+            base, hp = worker(int(s))
+            base_samples.append(base)
+            hp_samples.append(hp)
 
-    return np.asarray(samples, dtype=float)
-
+    return np.asarray(base_samples, dtype=float), np.asarray(hp_samples, dtype=float)
