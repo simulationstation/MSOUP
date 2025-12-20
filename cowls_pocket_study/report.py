@@ -38,8 +38,8 @@ def _plot_example_lens(
         axes[0, 1].plot(x, y, "wo")
 
     axes[1, 0].plot(window.theta_grid, window.s_grid)
-    axes[1, 0].set_xlabel(r"$\\theta$")
-    axes[1, 0].set_ylabel("S(θ)")
+    axes[1, 0].set_xlabel(r"$\theta$")
+    axes[1, 0].set_ylabel(r"$S(\theta)$")
     axes[1, 0].set_title("Sensitivity window")
 
     axes[1, 1].hist(candidates.strengths, bins=15, color="gray")
@@ -72,11 +72,15 @@ def build_report(
     preprocess_map: Dict[str, PreprocessResult],
     candidate_map: Dict[str, CandidateResult],
     windows: Dict[str, SensitivityWindowReal],
+    errors: List[str] = None,
 ) -> None:
     """Write markdown report and diagnostic plots."""
     out_dir.mkdir(parents=True, exist_ok=True)
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
+
+    if errors is None:
+        errors = []
 
     example_plots = []
     for lens_id in kept_lenses[:4]:
@@ -90,46 +94,61 @@ def build_report(
             )
         )
 
-    _plot_hist(
-        [len(candidate_map[l].theta) for l in kept_lenses],
-        "Candidates per lens",
-        "N candidates",
-        plots_dir / "candidate_counts.png",
-    )
+    if kept_lenses:
+        _plot_hist(
+            [len(candidate_map[l].theta) for l in kept_lenses],
+            "Candidates per lens",
+            "N candidates",
+            plots_dir / "candidate_counts.png",
+        )
 
-    _plot_hist(
-        [s.C_excess for s in aggregate.lens_stats],
-        "C_obs vs C_excess",
-        "C_excess",
-        plots_dir / "c_excess.png",
-    )
+    if aggregate is not None:
+        _plot_hist(
+            [s.C_excess for s in aggregate.lens_stats],
+            "C_obs vs C_excess",
+            "C_excess",
+            plots_dir / "c_excess.png",
+        )
 
-    _plot_hist(
-        [s.Z for s in aggregate.lens_stats],
-        "Z distribution",
-        "Z",
-        plots_dir / "z_values.png",
-    )
+        _plot_hist(
+            [s.Z for s in aggregate.lens_stats],
+            "Z distribution",
+            "Z",
+            plots_dir / "z_values.png",
+        )
 
     report_path = out_dir / "report.md"
     with report_path.open("w") as f:
         f.write("# JWST COWLS pocket-domain search\n\n")
         f.write("## Summary statistics\n")
         f.write(f"- Lenses analyzed: {len(kept_lenses)}\n")
-        f.write(f"- Mean C_excess: {np.mean([s.C_excess for s in aggregate.lens_stats]):.4f}\n")
-        f.write(f"- Global Z (mean): {aggregate.global_Z:.3f}\n")
-        f.write(f"- Global p-value (one-sided): {aggregate.global_pvalue:.4f}\n")
-        f.write(f"- Sign test p-value: {aggregate.sign_test_pvalue:.4f}\n")
-        f.write(f"- Bootstrap mean(C_excess): {aggregate.bootstrap_mean:.4f}\n\n")
 
-        f.write("## Controls and falsifiers\n")
-        f.write("- Shuffle test: expect C_excess≈0 when θ are redrawn from S(θ).\n")
-        f.write("- Window-stress test: sharpening S(θ) inflates C_obs but keeps C_excess near 0 under null.\n")
-        f.write("- Cox-only check: varying candidate rates alone does not produce positive C_excess.\n\n")
+        if aggregate is not None:
+            f.write(f"- Mean C_excess: {np.mean([s.C_excess for s in aggregate.lens_stats]):.4f}\n")
+            f.write(f"- Global Z (mean): {aggregate.global_Z:.3f}\n")
+            f.write(f"- Global p-value (one-sided): {aggregate.global_pvalue:.4f}\n")
+            f.write(f"- Sign test p-value: {aggregate.sign_test_pvalue:.4f}\n")
+            f.write(f"- Bootstrap mean(C_excess): {aggregate.bootstrap_mean:.4f}\n\n")
+
+            f.write("## Controls and falsifiers\n")
+            f.write("- Shuffle test: expect C_excess≈0 when θ are redrawn from S(θ).\n")
+            f.write("- Window-stress test: sharpening S(θ) inflates C_obs but keeps C_excess near 0 under null.\n")
+            f.write("- Cox-only check: varying candidate rates alone does not produce positive C_excess.\n\n")
+        else:
+            f.write("\n**WARNING:** No lenses passed QC - no aggregate statistics available.\n\n")
+
+        if errors:
+            f.write("## Processing Errors\n\n")
+            for err in errors:
+                f.write(f"- {err}\n")
+            f.write("\n")
 
         f.write("## Example lenses and products\n")
-        for plot in example_plots:
-            f.write(f"![{plot}]({Path('plots') / plot})\n\n")
+        if example_plots:
+            for plot in example_plots:
+                f.write(f"![{plot}]({Path('plots') / plot})\n\n")
+        else:
+            f.write("*No example plots available (no lenses passed QC).*\n\n")
 
         f.write("## Pipeline success checklist\n")
         f.write("- [x] Used only JWST COWLS imaging on disk\n")

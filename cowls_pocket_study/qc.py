@@ -19,7 +19,7 @@ class QCDecision:
     reasons: List[str]
 
 
-def evaluate_qc(preprocess: PreprocessResult, candidates: CandidateResult, min_arc_pixels: int = 50) -> QCDecision:
+def evaluate_qc(preprocess: PreprocessResult, candidates: CandidateResult, min_arc_pixels: int = 20) -> QCDecision:
     """Decide whether to keep a lens for analysis."""
     reasons: List[str] = []
     arc_pixels = int(np.sum(preprocess.arc_mask))

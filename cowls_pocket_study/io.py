@@ -19,7 +19,13 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
-DEFAULT_DATA_ROOT = Path("data") / "jwst_cowls"
+DEFAULT_DATA_ROOT = Path("data") / "jwst_cowls" / "repo"
+
+# Score bins in priority order (M25 = highest quality)
+SCORE_BINS = ["M25"] + [f"S{i:02d}" for i in range(12, -1, -1)]
+
+# Expected NIRCam bands
+NIRCAM_BANDS = ["F115W", "F150W", "F277W", "F444W"]
 
 
 @dataclass
@@ -28,21 +34,26 @@ class LensRecord:
 
     lens_id: str
     path: Path
+    score_bin: str
     available_bands: List[str]
     catalogue_row: Optional[pd.Series] = None
     model_products: Optional[Dict[str, Path]] = None
 
 
-def _extract_band_from_name(path: Path) -> Optional[str]:
-    """Heuristic band parser from filenames."""
-    for part in path.name.split("_"):
-        if part.upper().startswith("F") and part.upper().endswith("W"):
-            return part.upper()
-    return None
+def _discover_bands(lens_dir: Path) -> List[str]:
+    """Discover available bands by looking for band subdirectories with data.fits."""
+    bands = []
+    for band in NIRCAM_BANDS:
+        band_dir = lens_dir / band
+        if band_dir.is_dir() and (band_dir / "data.fits").exists():
+            bands.append(band)
+    return bands
 
 
 def discover_lenses(
-    data_root: Path = DEFAULT_DATA_ROOT, subset: Optional[Iterable[str]] = None
+    data_root: Path = DEFAULT_DATA_ROOT,
+    subset: Optional[Iterable[str]] = None,
+    score_bins: Optional[List[str]] = None,
 ) -> List[LensRecord]:
     """
     Discover lens folders beneath ``data_root``.
@@ -50,45 +61,81 @@ def discover_lenses(
     Parameters
     ----------
     data_root:
-        Base folder containing COWLS data.
+        Base folder containing COWLS repo (with M25, S00, ... subdirs).
     subset:
         Optional iterable of lens IDs to keep.
+    score_bins:
+        Optional list of score bins to include (e.g., ["M25", "S12", "S11", "S10"]).
+        If None, includes all bins.
     """
     data_root = Path(data_root)
-    lens_dirs = [p for p in data_root.iterdir() if p.is_dir()]
-    if subset is not None:
-        wanted = {s.strip() for s in subset}
-        lens_dirs = [p for p in lens_dirs if p.name in wanted]
+    wanted = {s.strip() for s in subset} if subset is not None else None
+    bins_to_scan = score_bins if score_bins else SCORE_BINS
 
+    # Try to load catalogue from parent or current dir
     catalogue = load_catalogue(data_root / "catalogue.csv")
+    if catalogue is None:
+        catalogue = load_catalogue(data_root.parent / "catalogue.csv")
+
     records: List[LensRecord] = []
-    for lens_dir in sorted(lens_dirs):
-        band_files = list(lens_dir.glob("*.fits"))
-        bands = []
-        for f in band_files:
-            band = _extract_band_from_name(f)
-            if band:
-                bands.append(band)
-        catalogue_row = catalogue.loc[lens_dir.name] if catalogue is not None and lens_dir.name in catalogue.index else None
-        records.append(
-            LensRecord(
-                lens_id=lens_dir.name,
-                path=lens_dir,
-                available_bands=sorted(set(bands)),
-                catalogue_row=catalogue_row,
-                model_products=_discover_model_products(lens_dir),
+    for score_bin in bins_to_scan:
+        bin_dir = data_root / score_bin
+        if not bin_dir.is_dir():
+            continue
+
+        for lens_dir in sorted(bin_dir.iterdir()):
+            if not lens_dir.is_dir():
+                continue
+            if wanted is not None and lens_dir.name not in wanted:
+                continue
+
+            bands = _discover_bands(lens_dir)
+            if not bands:
+                continue  # Skip lenses without any valid band data
+
+            catalogue_row = None
+            if catalogue is not None and lens_dir.name in catalogue.index:
+                catalogue_row = catalogue.loc[lens_dir.name]
+
+            records.append(
+                LensRecord(
+                    lens_id=lens_dir.name,
+                    path=lens_dir,
+                    score_bin=score_bin,
+                    available_bands=bands,
+                    catalogue_row=catalogue_row,
+                    model_products=_discover_model_products(lens_dir),
+                )
             )
-        )
     return records
 
 
 def _discover_model_products(lens_dir: Path) -> Dict[str, Path]:
-    """Identify model/residual FITS if present."""
+    """Identify model/residual FITS if present in band result folders."""
     products: Dict[str, Path] = {}
-    for candidate in lens_dir.glob("*residual*.fits"):
-        products["residual"] = candidate
-    for candidate in lens_dir.glob("*model*.fits"):
-        products.setdefault("model_image", candidate)
+
+    # Check each band's result folder for model products
+    for band in NIRCAM_BANDS:
+        result_dir = lens_dir / band / "result"
+        if not result_dir.is_dir():
+            continue
+
+        # Look for lens model components
+        lens_light = result_dir / "lens_light.fits"
+        source_light = result_dir / "source_light.fits"
+        source_recon = result_dir / "source_reconstruction.fits"
+
+        if lens_light.exists():
+            products.setdefault("lens_light", lens_light)
+        if source_light.exists():
+            products.setdefault("source_light", source_light)
+        if source_recon.exists():
+            products.setdefault("source_reconstruction", source_recon)
+
+        # Mark that we have modeling results for this band
+        if any([lens_light.exists(), source_light.exists()]):
+            products[f"{band}_has_model"] = result_dir
+
     return products
 
 
@@ -182,17 +229,17 @@ def locate_band_files(lens_dir: Path, band: str) -> Tuple[Optional[Path], Option
     """
     Locate science and noise files for a band.
 
-    Heuristic: look for files containing the band name and either ``"noise"``
-    or ``"ivar"`` for noise maps.
+    In COWLS structure, files are in subdirectories:
+    - {lens_dir}/{band}/data.fits (science)
+    - {lens_dir}/{band}/noise_map.fits (noise)
     """
-    science = None
-    noise = None
-    for f in lens_dir.glob(f"*{band}*.fits"):
-        name_lower = f.name.lower()
-        if "noise" in name_lower or "ivar" in name_lower:
-            noise = f
-        else:
-            science = f if science is None else science
+    band_dir = lens_dir / band
+    if not band_dir.is_dir():
+        return None, None
+
+    science = band_dir / "data.fits" if (band_dir / "data.fits").exists() else None
+    noise = band_dir / "noise_map.fits" if (band_dir / "noise_map.fits").exists() else None
+
     return science, noise
 
 

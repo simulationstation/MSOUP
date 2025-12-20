@@ -24,6 +24,11 @@ class CandidateResult:
     residual_map: np.ndarray
     method: str
 
+    @property
+    def n_candidates(self) -> int:
+        """Number of detected candidates."""
+        return len(self.theta)
+
 
 def _load_residual_from_model(model_products: Dict[str, Path]) -> Optional[np.ndarray]:
     """Load residual map if provided by modeling outputs."""
@@ -61,7 +66,7 @@ def _find_peaks_above_threshold(
     residual: np.ndarray,
     noise: np.ndarray,
     preprocess: PreprocessResult,
-    threshold_sigma: float = 5.0,
+    threshold_sigma: float = 3.0,
     min_separation: float = 0.1,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Locate local maxima in residual map restricted to arc mask."""
@@ -95,7 +100,7 @@ def detect_candidates(
     cache_root: Path,
     lens_id: str,
     model_products: Optional[Dict[str, Path]] = None,
-    threshold_sigma: float = 5.0,
+    threshold_sigma: float = 3.0,
     min_separation: float = 0.1,
 ) -> CandidateResult:
     """Detect perturbation candidates with caching."""

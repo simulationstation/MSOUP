@@ -47,6 +47,23 @@ data/jwst_cowls/repo/
 data/jwst_cowls/*.json
 data/jwst_cowls/*.py
 
+# ALMA SDP.81 dataset
+data/alma_sdp81/
+
+# Generic data file exclusions
+data/**/*.tgz
+data/**/*.tar
+data/**/*.fits
+data/**/*.ms
+data/**/*.ms.split
+data/**/*.ms.split.cal
+data/**/casa*
+data/**/CASA*
+data/**/__pycache__/
+
+# Results cache
+results/**/cache/
+
 # OS
 .DS_Store
 Thumbs.db

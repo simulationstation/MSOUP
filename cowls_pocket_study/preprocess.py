@@ -48,9 +48,18 @@ def estimate_center(image: np.ndarray, lens: LensRecord, window: int = 15) -> Tu
 
 
 def estimate_einstein_radius(
-    snr_map: np.ndarray, center: Tuple[float, float], lens: LensRecord
+    snr_map: np.ndarray, center: Tuple[float, float], lens: LensRecord,
+    min_radius: float = 8.0,
 ) -> float:
-    """Use catalogue radius if present, otherwise peak SNR radius."""
+    """
+    Use catalogue radius if present, otherwise find arc peak SNR radius.
+
+    Parameters
+    ----------
+    min_radius : float
+        Minimum radius to search for arc (excludes central deflector light).
+        Default 8 pixels (~0.5 arcsec at JWST NIRCam scale).
+    """
     if lens.catalogue_row is not None:
         for key in ("theta_e", "einstein_radius", "r_ein"):
             if key in lens.catalogue_row.index:
@@ -58,12 +67,26 @@ def estimate_einstein_radius(
 
     y, x = np.indices(snr_map.shape)
     r = np.hypot(x - center[0], y - center[1])
-    r_bins = np.linspace(0, r.max(), 50)
+
+    # Search for arc peak outside the central region
+    r_bins = np.linspace(min_radius, r.max() * 0.6, 40)
     prof, _ = np.histogram(r, bins=r_bins, weights=snr_map)
     counts, _ = np.histogram(r, bins=r_bins)
     snr_prof = prof / (counts + 1e-6)
-    peak_idx = np.nanargmax(snr_prof)
+
+    # Find first significant local maximum (arc signature)
     r_centers = 0.5 * (r_bins[1:] + r_bins[:-1])
+
+    # Look for peak or plateau in the profile
+    # Use weighted approach: higher SNR at smaller radius is more significant
+    weighted_prof = snr_prof * (1.0 + 0.5 * (r_centers.max() - r_centers) / r_centers.max())
+    peak_idx = np.nanargmax(weighted_prof)
+
+    # Fallback to a reasonable default if profile is flat
+    if snr_prof[peak_idx] < 0.5:
+        # Use 1/4 of image size as default Einstein radius
+        return float(snr_map.shape[0] / 4)
+
     return float(r_centers[peak_idx])
 
 
@@ -78,15 +101,26 @@ def build_arc_mask(
     image: np.ndarray,
     noise: np.ndarray,
     lens: LensRecord,
-    snr_threshold: float = 2.5,
-    annulus_width: float = 0.35,
+    snr_threshold: float = 1.2,
+    annulus_width: float = 0.50,
 ) -> PreprocessResult:
     """
     Construct an arc mask guided by SNR in an annulus around the Einstein radius.
+
+    Parameters
+    ----------
+    snr_threshold : float
+        Minimum SNR to include in arc mask. Default 1.2 (lowered to capture faint arcs).
+    annulus_width : float
+        Fractional width of annulus around Einstein radius. Default 0.50 (widened).
     """
     center = estimate_center(image, lens)
     snr_map = image / (noise + 1e-6)
-    einstein_radius = estimate_einstein_radius(snr_map, center, lens)
+
+    # Smooth SNR map before thresholding to reduce noise
+    snr_smooth = gaussian_filter(snr_map, sigma=1.5)
+
+    einstein_radius = estimate_einstein_radius(snr_smooth, center, lens)
     y, x = np.indices(image.shape)
     r = np.hypot(x - center[0], y - center[1])
     inner = einstein_radius * (1 - annulus_width)
@@ -94,9 +128,11 @@ def build_arc_mask(
     annulus = (r >= inner) & (r <= outer)
 
     lens_mask = _mask_central_region(image, center)
-    candidate = annulus & (snr_map > snr_threshold)
-    cleaned = binary_opening(candidate, iterations=2)
-    cleaned = binary_closing(cleaned, iterations=2)
+    candidate = annulus & (snr_smooth > snr_threshold)
+
+    # Light morphological cleaning (1 iteration instead of 2)
+    cleaned = binary_opening(candidate, iterations=1)
+    cleaned = binary_closing(cleaned, iterations=1)
     cleaned &= ~lens_mask
 
     return PreprocessResult(
