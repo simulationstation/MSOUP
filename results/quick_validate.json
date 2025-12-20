@@ -1,0 +1,12 @@
+{
+  "cdm_limit_ok": true,
+  "suppression_works": true,
+  "k_hm": null,
+  "M_hm": null,
+  "lensing_ok": true,
+  "falsifiers": {
+    "f1": false,
+    "f2": false,
+    "f3": false
+  }
+}

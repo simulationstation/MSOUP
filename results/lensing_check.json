@@ -1,0 +1,61 @@
+{
+  "model_M_hm": 263426662.73167384,
+  "n_constraints": 4,
+  "n_passed": 1,
+  "n_violated": 3,
+  "n_not_comparable": 0,
+  "overall_consistent": false,
+  "constraints": [
+    {
+      "paper": "Gilman2020_FluxRatios",
+      "reference": "Gilman et al. 2020, MNRAS 491, 6077",
+      "status": "violated",
+      "constraint_type": "upper_limit",
+      "M_hm_limit": 41277070.363162704,
+      "model_M_hm": 263426662.73167384,
+      "limit": 41277070.363162704,
+      "model": 263426662.73167384,
+      "satisfied": "False",
+      "sigma_distance": 0.022214959236851115,
+      "comparison": "M_hm_model (2.63e+08) > limit (4.13e+07)"
+    },
+    {
+      "paper": "Hsueh2020_SHARP",
+      "reference": "Hsueh et al. 2020, MNRAS 492, 3047",
+      "status": "violated",
+      "constraint_type": "upper_limit",
+      "M_hm_limit": 98887233.9039281,
+      "model_M_hm": 263426662.73167384,
+      "limit": 98887233.9039281,
+      "model": 263426662.73167384,
+      "satisfied": "False",
+      "sigma_distance": 0.016453942882774575,
+      "comparison": "M_hm_model (2.63e+08) > limit (9.89e+07)"
+    },
+    {
+      "paper": "Vegetti2018_Detection",
+      "reference": "Vegetti et al. 2018, MNRAS 481, 3661",
+      "status": "passed",
+      "constraint_type": "detection",
+      "M_hm_limit": 1000000000.0,
+      "model_M_hm": 263426662.73167384,
+      "detection_scale": 1000000000.0,
+      "model": 263426662.73167384,
+      "satisfied": "True",
+      "comparison": "Detection at 1.00e+09 requires M_hm < this scale"
+    },
+    {
+      "paper": "Enzi2021_Combined",
+      "reference": "Enzi et al. 2021, MNRAS 506, 5848",
+      "status": "violated",
+      "constraint_type": "upper_limit",
+      "M_hm_limit": 21786926.602299217,
+      "model_M_hm": 263426662.73167384,
+      "limit": 21786926.602299217,
+      "model": 263426662.73167384,
+      "satisfied": "False",
+      "sigma_distance": 0.024163973612937463,
+      "comparison": "M_hm_model (2.63e+08) > limit (2.18e+07)"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "n_lenses": 3000,
+  "seed": 42,
+  "detection_mode": "thin",
+  "runtime_seconds": 38.12645483016968,
+  "models": {
+    "poisson_window": {
+      "mean_count": 0.478,
+      "fano_factor": 0.7047057182705718,
+      "clustering_C": 0.2566371681415929,
+      "C_obs": 0.2566371681415929,
+      "C_excess": -0.004528023598820063,
+      "Z_mean": 0.0130018818692354,
+      "global_pvalue": 0.44503647521629663
+    },
+    "cox_window": {
+      "mean_count": 0.4196666666666667,
+      "fano_factor": 0.8329147471538259,
+      "clustering_C": 0.21975308641975308,
+      "C_obs": 0.21975308641975308,
+      "C_excess": -0.047666666666666656,
+      "Z_mean": -0.09943189265058512,
+      "global_pvalue": 0.8760150134147111
+    },
+    "cluster_window": {
+      "mean_count": 0.473,
+      "fano_factor": 0.9850690627202257,
+      "clustering_C": 0.4696562032884903,
+      "C_obs": 0.4696562032884903,
+      "C_excess": 0.1928116591928251,
+      "Z_mean": 0.49987243276038423,
+      "global_pvalue": 4.1744385725905886e-14
+    }
+  },
+  "sweep": {
+    "n_configs": 48,
+    "max_C_obs": 0.3682170542635659
+  }
+}

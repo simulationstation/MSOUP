@@ -1,0 +1,183 @@
+{
+  "timestamp": "2025-12-19T22:05:35.672643",
+  "data_source": "REAL_SPARC",
+  "model_commitments": {
+    "n_global_params": 4,
+    "param_names": [
+      "c_star_sq",
+      "Delta_M",
+      "z_t",
+      "w"
+    ],
+    "fixed_kappa": 1.0,
+    "half_mode_threshold": 0.25,
+    "notes": "\u03ba is fixed at 1.0, NOT fitted"
+  },
+  "sparc_analysis": {
+    "n_galaxies": 33,
+    "selection_criteria": {
+      "v_max_cut": 80.0,
+      "min_points": 8,
+      "max_quality": 2
+    },
+    "cdm_fit": {
+      "total_chi2": 841.1132943542761,
+      "total_dof": 365,
+      "chi2_per_dof": 2.3044199845322635,
+      "n_success": 33
+    }
+  },
+  "lensing_analysis": {
+    "constraints": [
+      {
+        "paper": "Gilman2020_FluxRatios",
+        "reference": "Gilman et al. 2020, MNRAS 491, 6077",
+        "reported_quantity": "m_WDM",
+        "reported_value": 5.2,
+        "reported_units": "keV",
+        "confidence_level": 0.95,
+        "mapping_used": "Schneider et al. 2012 thermal relic relation",
+        "M_hm_equivalent_Msun": 41277070.363162704,
+        "m_WDM_equivalent_keV": 5.2,
+        "constraint_type": "upper_limit",
+        "z_lens": 0.5,
+        "notes": "Combined analysis of 11 quadruply lensed quasars"
+      },
+      {
+        "paper": "Hsueh2020_SHARP",
+        "reference": "Hsueh et al. 2020, MNRAS 492, 3047",
+        "reported_quantity": "m_WDM",
+        "reported_value": 4.0,
+        "reported_units": "keV",
+        "confidence_level": 0.95,
+        "mapping_used": "Schneider et al. 2012 thermal relic relation",
+        "M_hm_equivalent_Msun": 98887233.9039281,
+        "m_WDM_equivalent_keV": 4.0,
+        "constraint_type": "upper_limit",
+        "z_lens": 0.6,
+        "notes": "SHARP gravitational imaging analysis"
+      },
+      {
+        "paper": "Vegetti2018_Detection",
+        "reference": "Vegetti et al. 2018, MNRAS 481, 3661",
+        "reported_quantity": "M_sub",
+        "reported_value": 1000000000.0,
+        "reported_units": "M_sun",
+        "confidence_level": 0.95,
+        "mapping_used": "Direct mass detection",
+        "M_hm_equivalent_Msun": 1000000000.0,
+        "m_WDM_equivalent_keV": 1.996642450109794,
+        "constraint_type": "detection",
+        "z_lens": 0.88,
+        "notes": "Direct detection - model must not suppress this scale"
+      },
+      {
+        "paper": "Enzi2021_Combined",
+        "reference": "Enzi et al. 2021, MNRAS 506, 5848",
+        "reported_quantity": "m_WDM",
+        "reported_value": 6.3,
+        "reported_units": "keV",
+        "confidence_level": 0.95,
+        "mapping_used": "Schneider et al. 2012 thermal relic relation",
+        "M_hm_equivalent_Msun": 21786926.602299217,
+        "m_WDM_equivalent_keV": 6.3,
+        "constraint_type": "upper_limit",
+        "z_lens": 0.5,
+        "notes": "Most stringent combined constraint"
+      }
+    ]
+  },
+  "parameter_scan": {
+    "values": [
+      {
+        "c_star_sq": 0,
+        "ratio_min": 1.0,
+        "k_hm": null,
+        "M_hm": 0.0,
+        "m_WDM_equiv": null,
+        "chi2": 841.1132943542761,
+        "delta_chi2": 0.0,
+        "lensing_ok": true,
+        "n_lensing_violated": 0
+      },
+      {
+        "c_star_sq": 25,
+        "ratio_min": 0.0392020594064313,
+        "k_hm": 35.071565485990426,
+        "M_hm": 263426662.73167384,
+        "m_WDM_equiv": 2.9804123708733994,
+        "chi2": 240.68839521911156,
+        "delta_chi2": 600.4248991351647,
+        "lensing_ok": false,
+        "n_lensing_violated": 3
+      },
+      {
+        "c_star_sq": 50,
+        "ratio_min": 0.01999291135248956,
+        "k_hm": 24.76120177090765,
+        "M_hm": 748531408.7991928,
+        "m_WDM_equiv": 2.178086215875826,
+        "chi2": 242.61146506014083,
+        "delta_chi2": 598.5018292941353,
+        "lensing_ok": false,
+        "n_lensing_violated": 3
+      },
+      {
+        "c_star_sq": 100,
+        "ratio_min": 0.010097393826072703,
+        "k_hm": 17.532520470682712,
+        "M_hm": 2108589898.5745635,
+        "m_WDM_equiv": 1.5958988760747435,
+        "chi2": 244.22053663453482,
+        "delta_chi2": 596.8927577197413,
+        "lensing_ok": false,
+        "n_lensing_violated": 4
+      },
+      {
+        "c_star_sq": 200,
+        "ratio_min": 0.005074315594514147,
+        "k_hm": 12.388388795137226,
+        "M_hm": 5976964899.87395,
+        "m_WDM_equiv": 1.1671398868950427,
+        "chi2": 245.90453662641033,
+        "delta_chi2": 595.2087577278658,
+        "lensing_ok": false,
+        "n_lensing_violated": 4
+      },
+      {
+        "c_star_sq": 400,
+        "ratio_min": 0.002543611340603077,
+        "k_hm": 8.763517924379869,
+        "M_hm": 16884560001.975853,
+        "m_WDM_equiv": 0.8544462742987381,
+        "chi2": 257.17671727213786,
+        "delta_chi2": 583.9365770821382,
+        "lensing_ok": false,
+        "n_lensing_violated": 4
+      },
+      {
+        "c_star_sq": 800,
+        "ratio_min": 0.0012734252197166799,
+        "k_hm": 6.197082057469926,
+        "M_hm": 47748908139.60156,
+        "m_WDM_equiv": 0.6253268455496308,
+        "chi2": 304.97764918793786,
+        "delta_chi2": 536.1356451663382,
+        "lensing_ok": false,
+        "n_lensing_violated": 4
+      }
+    ]
+  },
+  "verdict": {
+    "falsifiers": {
+      "sparc_improvement_significant": true,
+      "best_delta_chi2": 600.4248991351647,
+      "best_c_star_sq": 25,
+      "lensing_compatible_region_exists": false,
+      "large_scale_suppression_ok": true,
+      "multi_probe_tension": true
+    },
+    "status": "MULTI_PROBE_TENSION",
+    "message": "Model shows tension: SPARC-improving region violates lensing constraints"
+  }
+}

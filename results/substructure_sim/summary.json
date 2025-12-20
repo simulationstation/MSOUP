@@ -1,0 +1,34 @@
+{
+  "n_lenses": 10000,
+  "seed": 0,
+  "runtime_seconds": -0.9584541320800781,
+  "models": {
+    "poisson": {
+      "mean_count": 0.5739,
+      "fano_factor": 1.0593113608642621,
+      "fano_se": 0.01492597986867501,
+      "clustering_C": 0.09574468085106383,
+      "clustering_C_se": 0.00791691939117163,
+      "residual_dispersion": 0.7917013038497244,
+      "tail_prob": 0.0257
+    },
+    "cox": {
+      "mean_count": 0.5798,
+      "fano_factor": 1.5930182131769577,
+      "fano_se": 0.04137483787795098,
+      "clustering_C": 0.09039071691653852,
+      "clustering_C_se": 0.006708075764500312,
+      "residual_dispersion": 1.1735055008933695,
+      "tail_prob": 0.0461
+    },
+    "cluster": {
+      "mean_count": 0.5782,
+      "fano_factor": 1.3529656866136286,
+      "fano_se": 0.025766368149531114,
+      "clustering_C": 0.320385587863464,
+      "clustering_C_se": 0.011488189235180152,
+      "residual_dispersion": 1.0140863267925964,
+      "tail_prob": 0.0404
+    }
+  }
+}

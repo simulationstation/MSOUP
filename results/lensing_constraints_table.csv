@@ -1,0 +1,5 @@
+paper,reference,reported_quantity,reported_value,reported_units,confidence_level,mapping_used,M_hm_equivalent_Msun,m_WDM_equivalent_keV,constraint_type,z_lens,notes
+Gilman2020_FluxRatios,"Gilman et al. 2020, MNRAS 491, 6077",m_WDM,5.2,keV,0.95,Schneider et al. 2012 thermal relic relation,41277070.363162704,5.2,upper_limit,0.5,Combined analysis of 11 quadruply lensed quasars
+Hsueh2020_SHARP,"Hsueh et al. 2020, MNRAS 492, 3047",m_WDM,4.0,keV,0.95,Schneider et al. 2012 thermal relic relation,98887233.9039281,4.0,upper_limit,0.6,SHARP gravitational imaging analysis
+Vegetti2018_Detection,"Vegetti et al. 2018, MNRAS 481, 3661",M_sub,1000000000.0,M_sun,0.95,Direct mass detection,1000000000.0,1.996642450109794,detection,0.88,Direct detection - model must not suppress this scale
+Enzi2021_Combined,"Enzi et al. 2021, MNRAS 506, 5848",m_WDM,6.3,keV,0.95,Schneider et al. 2012 thermal relic relation,21786926.602299217,6.3,upper_limit,0.5,Most stringent combined constraint

@@ -1,0 +1,17 @@
+{
+  "cdm_limit": {
+    "passed": true
+  },
+  "monotone_z0": {
+    "passed": true
+  },
+  "monotone_z1": {
+    "passed": true
+  },
+  "monotone_z2": {
+    "passed": true
+  },
+  "half_mode_stable": {
+    "passed": true
+  }
+}

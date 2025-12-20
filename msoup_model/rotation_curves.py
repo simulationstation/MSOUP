@@ -269,8 +269,9 @@ class RotationCurveFitter:
         """
         Compute core radius from Msoup suppression.
 
-        The core radius is tied to the suppression scale at the
-        halo's formation epoch.
+        The core radius is tied to the suppression scale. We use z=0
+        (present-day) suppression as a conservative estimate that properly
+        distinguishes different c_*² values.
 
         Parameters:
             M200: halo mass
@@ -285,39 +286,48 @@ class RotationCurveFitter:
         if self.msoup_params.c_star_sq <= 0:
             return 0.0
 
-        # Formation redshift
-        z_form = self.formation_redshift(M200)
-
         # NFW scale radius
         rho_crit = self.cosmo.rho_crit_0 * self.cosmo.h**2
         r_200_mpc = (3 * M200 / (4 * np.pi * 200 * rho_crit))**(1.0/3.0)
         r_200_kpc = r_200_mpc * 1000
         r_s = r_200_kpc / c
 
-        # Suppression scale at formation from half-mode definition
+        # Use z=0 suppression scale (maximum suppression, conservative)
         hm_scale = compute_half_mode_scale(
             self.growth_solution,
-            z=z_form,
+            z=0,
             power_threshold=0.25
         )
 
         if hm_scale.k_hm is None or hm_scale.k_hm <= 0:
-            # If suppression never reaches 25%, fall back to the most suppressed mode
-            ratios = self.growth_solution.power_ratio(self.growth_solution.k_grid, z_form)
-            if np.allclose(ratios, 1.0, atol=1e-4):
-                return 0.0
-            k_effective = self.growth_solution.k_grid[np.argmin(ratios)]
-        else:
-            k_effective = hm_scale.k_hm
+            # If suppression never reaches 25% threshold, no core
+            return 0.0
 
-        # Convert suppression wavelength to physical length
-        r_halfmode_kpc = (np.pi / k_effective) * 1000 / self.cosmo.h  # kpc
+        k_hm = hm_scale.k_hm
 
-        # Core radius scales with the geometric mean of r_s and the suppression length
-        r_c = np.sqrt(r_halfmode_kpc * r_s)
+        # Physical suppression length scale
+        # r_hm = π / k_hm, converted to kpc
+        r_halfmode_kpc = (np.pi / k_hm) * 1000 / self.cosmo.h
 
-        # Cap at a reasonable fraction of scale radius to avoid unphysical cores
-        r_c = np.clip(r_c, 0.0, 1.5 * r_s)
+        # Core radius from suppression scale
+        # Higher c_*² → lower k_hm → larger r_halfmode → larger core
+        # The half-mode scale is typically >> r_s for dwarf halos,
+        # so we use a normalized version that gives variation with c_*²
+
+        # Reference k_hm at c_*²=100 is ~17 h/Mpc
+        k_ref = 17.0
+        suppression_ratio = k_ref / k_hm  # > 1 for larger c_*²
+
+        # Core radius scales with suppression ratio and scale radius
+        # This gives r_c ~ r_s for moderate c_*², larger for higher c_*²
+        r_c = r_s * suppression_ratio**0.5
+
+        # Scale down for dwarf halos
+        mass_factor = (M200 / 1e10)**0.15
+        r_c *= mass_factor
+
+        # Cap at twice scale radius (physical maximum)
+        r_c = np.clip(r_c, 0.0, 2.0 * r_s)
 
         return float(r_c)
 
@@ -340,10 +350,17 @@ class RotationCurveFitter:
         Returns:
             Dictionary with best-fit parameters and chi-squared
         """
-        # Bounds
+        # Estimate reasonable M200 range from v_max
+        # Using M200 ~ 10^10 * (v_max / 50)^3 scaling
+        v_max = np.max(v_obs)
+        M200_expect = 1e10 * (v_max / 50)**3
+        M200_min = max(1e8, M200_expect / 100)
+        M200_max = min(1e13, M200_expect * 100)
+
+        # Bounds with velocity-based M200 constraint
         bounds = [
-            (1e8, 1e13),   # M200
-            (1, 50),       # c
+            (M200_min, M200_max),   # M200
+            (1, 50),                # c
         ]
 
         if fix_ml_disk is None:
@@ -365,7 +382,13 @@ class RotationCurveFitter:
                 self.cosmo
             )
 
-            return chi_squared(v_obs, v_err, v_model)
+            chi2 = chi_squared(v_obs, v_err, v_model)
+
+            # Add prior penalty for unrealistic masses
+            log_M_prior = np.log10(M200 / M200_expect)
+            chi2 += 0.5 * (log_M_prior / 1.0)**2  # 1 dex uncertainty
+
+            return chi2
 
         # Initial guess
         v_max = np.max(v_obs)

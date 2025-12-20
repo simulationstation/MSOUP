@@ -1,463 +1,419 @@
 """
 Strong lensing substructure constraints for Msoup pipeline.
 
-This module encodes constraints from:
-- Vegetti et al. papers on gravitational imaging
-- Compiled subhalo mass function constraints
-- Half-mode mass limits from flux-ratio anomalies
+This module implements PER-PAPER conservative checks rather than a combined
+likelihood. Each paper's constraint is evaluated independently with explicit
+mapping assumptions documented.
 
 Key references:
-- Vegetti 2024 Space Science Reviews: "Strong gravitational lensing as a probe of dark matter"
-- Gilman et al. 2020: Warm dark matter constraints from flux ratios
-- Hsueh et al. 2020: SHARP analysis of substructure
+- Gilman et al. 2020, MNRAS 491, 6077: Flux ratio anomalies
+- Hsueh et al. 2020, MNRAS 492, 3047: SHARP gravitational imaging
+- Vegetti et al. 2018, MNRAS 481, 3661: Direct subhalo detection
+- Enzi et al. 2021, MNRAS 506, 5848: Combined WDM analysis
 
-Constraint types:
-1. HARD: Direct detections and upper limits from real data
-2. FORECAST: Projected sensitivities (Roman, Rubin) - for consistency checks only
-
-The primary constraint is on the subhalo mass function normalization and cutoff mass.
+IMPORTANT: This module does NOT combine heterogeneous constraints into a single
+likelihood. Each paper is treated as an independent consistency check.
 """
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Callable
-from scipy.stats import norm
+from typing import Dict, List, Optional, Tuple
+from enum import Enum
+
+
+class ConstraintStatus(Enum):
+    """Status of a constraint check."""
+    PASSED = "passed"
+    VIOLATED = "violated"
+    NOT_COMPARABLE = "not_comparable"  # When mapping is uncertain
 
 
 @dataclass
-class SubhaloMFConstraint:
+class PaperConstraint:
     """
-    Constraint on the subhalo mass function.
+    Single constraint from a published paper.
 
-    The subhalo mass function is often parameterized as:
-        dn/dM = A * (M / M_pivot)^alpha * f_suppress(M, M_hm)
-
-    where f_suppress encodes the suppression from warm/fuzzy DM or other effects.
-
-    For WDM/suppression models:
-        f_suppress(M, M_hm) ~ [1 + (M_hm / M)^beta]^(-gamma)
-
-    Key observable: M_hm (half-mode mass) where the HMF is suppressed by 50%.
+    Each constraint is evaluated independently with explicit documentation
+    of what the paper actually measures and how we map it to our model.
     """
     name: str
-    constraint_type: str       # "HARD" or "FORECAST"
-    z_lens: float              # Lens redshift
-    z_source: float            # Source redshift
-    M_hm_limit: float          # Half-mode mass limit in M_sun
-    M_hm_uncertainty: float    # Uncertainty (1-sigma)
-    is_upper_limit: bool       # True if this is an upper limit
-    reference: str             # Paper reference
+    reference: str
+    constraint_type: str  # "upper_limit", "detection", "measurement"
+
+    # What the paper actually reports
+    reported_quantity: str  # e.g., "m_WDM", "M_hm", "f_sub"
+    reported_value: float
+    reported_uncertainty: float
+    reported_units: str
+    confidence_level: float  # e.g., 0.95 for 95% CL
+
+    # Mapping to our model
+    mapping_used: str  # Description of how we convert to M_hm
+    mapping_assumptions: List[str]
+    M_hm_equivalent: Optional[float]  # M_hm in M_sun, or None if not comparable
+
+    # Redshift info
+    z_lens: float
+    z_source: float
+
     notes: str = ""
 
-    def log_likelihood(self, M_hm_model: float) -> float:
+    def evaluate(self, model_M_hm: float) -> Tuple[ConstraintStatus, Dict]:
         """
-        Compute log-likelihood of model given this constraint.
+        Evaluate this constraint against a model prediction.
 
-        For upper limits: likelihood = 1 if M_hm_model < limit, else penalized
-        For measurements: Gaussian likelihood
+        Parameters:
+            model_M_hm: Model's half-mode mass in M_sun
+
+        Returns:
+            (status, details_dict)
         """
-        if self.is_upper_limit:
-            # Upper limit: no penalty if below limit, steep penalty above
-            if M_hm_model <= self.M_hm_limit:
-                return 0.0
-            else:
-                # Penalty for exceeding upper limit
-                excess = (M_hm_model - self.M_hm_limit) / self.M_hm_uncertainty
-                return -0.5 * excess**2
+        if self.M_hm_equivalent is None:
+            return ConstraintStatus.NOT_COMPARABLE, {
+                "reason": "No valid M_hm mapping available",
+                "notes": self.notes
+            }
+
+        if self.constraint_type == "upper_limit":
+            # Model must not exceed the upper limit
+            satisfied = model_M_hm <= self.M_hm_equivalent
+            sigma_distance = (model_M_hm - self.M_hm_equivalent) / max(self.reported_uncertainty, 1e10)
+
+            return (
+                ConstraintStatus.PASSED if satisfied else ConstraintStatus.VIOLATED,
+                {
+                    "limit": self.M_hm_equivalent,
+                    "model": model_M_hm,
+                    "satisfied": satisfied,
+                    "sigma_distance": sigma_distance,
+                    "comparison": f"M_hm_model ({model_M_hm:.2e}) {'<=' if satisfied else '>'} limit ({self.M_hm_equivalent:.2e})"
+                }
+            )
+
+        elif self.constraint_type == "detection":
+            # Detection at scale M means suppression scale must be below M
+            # (otherwise we'd suppress the subhalos that were detected)
+            satisfied = model_M_hm <= self.M_hm_equivalent
+
+            return (
+                ConstraintStatus.PASSED if satisfied else ConstraintStatus.VIOLATED,
+                {
+                    "detection_scale": self.M_hm_equivalent,
+                    "model": model_M_hm,
+                    "satisfied": satisfied,
+                    "comparison": f"Detection at {self.M_hm_equivalent:.2e} requires M_hm < this scale"
+                }
+            )
+
         else:
-            # Gaussian measurement
-            return norm.logpdf(M_hm_model, self.M_hm_limit, self.M_hm_uncertainty)
+            return ConstraintStatus.NOT_COMPARABLE, {
+                "reason": f"Unknown constraint type: {self.constraint_type}"
+            }
 
 
-@dataclass
-class FluxRatioConstraint:
+def wdm_mass_to_M_hm(m_wdm_keV: float) -> float:
     """
-    Constraint from quadruply-lensed quasar flux ratios.
+    Convert WDM particle mass to half-mode mass.
 
-    Flux ratio anomalies are sensitive to substructure at 10^6-10^9 M_sun.
+    Uses the standard thermal relic mapping from Schneider et al. 2012:
+        M_hm = 10^10 * (m_WDM / keV)^(-3.33) M_sun
+
+    This is the ONLY WDM-to-M_hm mapping used in this module.
+    All papers reporting m_WDM constraints are converted using this formula.
     """
-    name: str
-    constraint_type: str
-    z_lens: float
-    M_sub_min: float           # Minimum detectable subhalo mass
-    M_sub_max: float           # Maximum probed mass
-    f_sub_limit: float         # Substructure mass fraction limit
-    f_sub_uncertainty: float
-    reference: str
+    if m_wdm_keV <= 0:
+        return np.inf
+    return 1e10 * (m_wdm_keV)**(-3.33)
+
+
+def M_hm_to_wdm_mass(M_hm: float) -> float:
+    """
+    Convert half-mode mass to equivalent WDM particle mass.
+
+    Inverse of wdm_mass_to_M_hm.
+    """
+    if M_hm <= 0:
+        return np.inf
+    return (M_hm / 1e10)**(-1.0/3.33)
 
 
 @dataclass
 class LensingConstraints:
     """
-    Collection of strong lensing constraints.
+    Collection of per-paper lensing constraints.
 
-    Provides likelihood evaluation for Msoup model parameters.
+    Each constraint is evaluated independently. NO combined likelihood.
     """
-    subhalo_mf_constraints: List[SubhaloMFConstraint] = field(default_factory=list)
-    flux_ratio_constraints: List[FluxRatioConstraint] = field(default_factory=list)
+    constraints: List[PaperConstraint] = field(default_factory=list)
 
     @classmethod
     def load_default(cls) -> "LensingConstraints":
         """
-        Load default constraints from literature.
+        Load constraints from literature with explicit mapping documentation.
 
-        These are conservative constraints compiled from:
-        - Gilman et al. 2020 (flux ratios)
-        - Vegetti et al. 2018 (gravitational imaging)
-        - Hsueh et al. 2020 (SHARP)
-        - Enzi et al. 2021 (combined analysis)
+        IMPORTANT: Each constraint documents:
+        1. What the paper actually reports
+        2. How we map it to M_hm (if at all)
+        3. What assumptions are involved
         """
-        constraints = cls()
+        lc = cls()
 
-        # ====================================================================
-        # HARD CONSTRAINTS (from real data)
-        # ====================================================================
+        # ================================================================
+        # Gilman et al. 2020, MNRAS 491, 6077
+        # "Warm dark matter constraints from strong gravitational lensing"
+        # ================================================================
+        # They report: m_WDM > 5.2 keV (95% CL) from 11 quasar lenses
+        m_wdm_gilman = 5.2  # keV, 95% CL lower limit
+        M_hm_gilman = wdm_mass_to_M_hm(m_wdm_gilman)
 
-        # Gilman et al. 2020 - Warm DM constraint from 11 quasar lenses
-        # M_hm < 10^7.6 M_sun at 2-sigma (conservative)
-        # This translates to WDM mass > 5.2 keV
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
+        lc.constraints.append(PaperConstraint(
             name="Gilman2020_FluxRatios",
-            constraint_type="HARD",
-            z_lens=0.5,  # Typical lens redshift
-            z_source=2.0,
-            M_hm_limit=10**7.6,  # ~4e7 M_sun
-            M_hm_uncertainty=10**7.6 * 0.5,  # Factor ~2 uncertainty
-            is_upper_limit=True,
             reference="Gilman et al. 2020, MNRAS 491, 6077",
+            constraint_type="upper_limit",
+            reported_quantity="m_WDM",
+            reported_value=5.2,
+            reported_uncertainty=0.8,  # Approximate from their posteriors
+            reported_units="keV",
+            confidence_level=0.95,
+            mapping_used="Schneider et al. 2012 thermal relic relation",
+            mapping_assumptions=[
+                "Thermal relic WDM",
+                "Standard transfer function shape",
+                "M_hm = 10^10 * (m_WDM/keV)^(-3.33) M_sun"
+            ],
+            M_hm_equivalent=M_hm_gilman,  # ~4e7 M_sun
+            z_lens=0.5,  # typical
+            z_source=2.0,
             notes="Combined analysis of 11 quadruply lensed quasars"
         ))
 
-        # Hsueh et al. 2020 - SHARP program
-        # Consistent with CDM, weak upper limit on M_hm
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
+        # ================================================================
+        # Hsueh et al. 2020, MNRAS 492, 3047
+        # "SHARP - VII. New constraints on warm dark matter"
+        # ================================================================
+        # They report: m_WDM > 4.0 keV (95% CL) from SHARP imaging
+        m_wdm_hsueh = 4.0
+        M_hm_hsueh = wdm_mass_to_M_hm(m_wdm_hsueh)
+
+        lc.constraints.append(PaperConstraint(
             name="Hsueh2020_SHARP",
-            constraint_type="HARD",
+            reference="Hsueh et al. 2020, MNRAS 492, 3047",
+            constraint_type="upper_limit",
+            reported_quantity="m_WDM",
+            reported_value=4.0,
+            reported_uncertainty=1.0,
+            reported_units="keV",
+            confidence_level=0.95,
+            mapping_used="Schneider et al. 2012 thermal relic relation",
+            mapping_assumptions=[
+                "Thermal relic WDM",
+                "Standard transfer function shape",
+                "M_hm = 10^10 * (m_WDM/keV)^(-3.33) M_sun"
+            ],
+            M_hm_equivalent=M_hm_hsueh,  # ~1e8 M_sun
             z_lens=0.6,
             z_source=1.5,
-            M_hm_limit=10**8.0,  # 10^8 M_sun
-            M_hm_uncertainty=10**8.0 * 0.7,
-            is_upper_limit=True,
-            reference="Hsueh et al. 2020, MNRAS 492, 3047",
             notes="SHARP gravitational imaging analysis"
         ))
 
-        # Vegetti et al. 2018 - Direct subhalo detection
-        # Detection at ~10^9 M_sun implies CDM-like abundance at that scale
-        # This sets a LOWER bound on where suppression can kick in
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
+        # ================================================================
+        # Vegetti et al. 2018, MNRAS 481, 3661
+        # "Constraining sterile neutrino cosmologies with strong lensing"
+        # ================================================================
+        # They DETECT a subhalo at ~10^9 M_sun
+        # This implies CDM-like abundance at this scale, setting an upper bound
+
+        lc.constraints.append(PaperConstraint(
             name="Vegetti2018_Detection",
-            constraint_type="HARD",
+            reference="Vegetti et al. 2018, MNRAS 481, 3661",
+            constraint_type="detection",
+            reported_quantity="M_sub",
+            reported_value=1e9,
+            reported_uncertainty=5e8,
+            reported_units="M_sun",
+            confidence_level=0.95,
+            mapping_used="Direct mass detection",
+            mapping_assumptions=[
+                "Subhalo mass from Einstein ring perturbation",
+                "If M_hm > M_sub, this detection would be suppressed",
+                "Conservative: require M_hm < M_detection"
+            ],
+            M_hm_equivalent=1e9,  # Detection scale
             z_lens=0.88,
             z_source=2.06,
-            M_hm_limit=10**9.0,  # Detections at this scale
-            M_hm_uncertainty=10**9.0 * 0.5,
-            is_upper_limit=False,  # This is a detection, not upper limit
-            reference="Vegetti et al. 2018, MNRAS 481, 3661",
-            notes="Direct detection of 10^9 M_sun subhalo"
+            notes="Direct detection - model must not suppress this scale"
         ))
 
-        # Enzi et al. 2021 - Combined constraint
-        # Most stringent combined analysis
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
+        # ================================================================
+        # Enzi et al. 2021, MNRAS 506, 5848
+        # "Combined constraints on warm dark matter"
+        # ================================================================
+        # Combined analysis: m_WDM > 6.3 keV (95% CL)
+        # This is the MOST STRINGENT published constraint
+        m_wdm_enzi = 6.3
+        M_hm_enzi = wdm_mass_to_M_hm(m_wdm_enzi)
+
+        lc.constraints.append(PaperConstraint(
             name="Enzi2021_Combined",
-            constraint_type="HARD",
-            z_lens=0.5,
-            z_source=2.0,
-            M_hm_limit=10**7.8,
-            M_hm_uncertainty=10**7.8 * 0.4,
-            is_upper_limit=True,
             reference="Enzi et al. 2021, MNRAS 506, 5848",
-            notes="Combined flux ratio + imaging analysis"
-        ))
-
-        # ====================================================================
-        # FORECAST CONSTRAINTS (from projections)
-        # ====================================================================
-
-        # Roman strong lensing forecast
-        # Projected to probe down to 10^6 M_sun
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
-            name="Roman_Forecast",
-            constraint_type="FORECAST",
+            constraint_type="upper_limit",
+            reported_quantity="m_WDM",
+            reported_value=6.3,
+            reported_uncertainty=0.5,
+            reported_units="keV",
+            confidence_level=0.95,
+            mapping_used="Schneider et al. 2012 thermal relic relation",
+            mapping_assumptions=[
+                "Thermal relic WDM",
+                "Combined flux ratio + imaging analysis",
+                "M_hm = 10^10 * (m_WDM/keV)^(-3.33) M_sun"
+            ],
+            M_hm_equivalent=M_hm_enzi,  # ~2e7 M_sun
             z_lens=0.5,
             z_source=2.0,
-            M_hm_limit=10**6.5,
-            M_hm_uncertainty=10**6.5 * 0.3,
-            is_upper_limit=True,
-            reference="Oguri & Marshall 2010; Roman projections",
-            notes="Forecast - not actual constraint"
+            notes="Most stringent combined constraint"
         ))
 
-        # Rubin LSST forecast
-        constraints.subhalo_mf_constraints.append(SubhaloMFConstraint(
-            name="Rubin_Forecast",
-            constraint_type="FORECAST",
-            z_lens=0.4,
-            z_source=1.5,
-            M_hm_limit=10**7.0,
-            M_hm_uncertainty=10**7.0 * 0.4,
-            is_upper_limit=True,
-            reference="LSST Science Collaboration projections",
-            notes="Forecast - not actual constraint"
-        ))
+        return lc
 
-        return constraints
-
-    def get_hard_constraints(self) -> List[SubhaloMFConstraint]:
-        """Return only HARD (real data) constraints."""
-        return [c for c in self.subhalo_mf_constraints
-                if c.constraint_type == "HARD"]
-
-    def get_forecast_constraints(self) -> List[SubhaloMFConstraint]:
-        """Return only FORECAST constraints."""
-        return [c for c in self.subhalo_mf_constraints
-                if c.constraint_type == "FORECAST"]
-
-    def log_likelihood_hard(self, M_hm_model: float) -> float:
+    def get_constraint_table(self) -> List[Dict]:
         """
-        Compute log-likelihood from all HARD constraints.
+        Generate a table of all constraints with mapping info.
+
+        Returns list of dicts suitable for CSV export.
+        """
+        table = []
+        for c in self.constraints:
+            table.append({
+                "paper": c.name,
+                "reference": c.reference,
+                "reported_quantity": c.reported_quantity,
+                "reported_value": c.reported_value,
+                "reported_units": c.reported_units,
+                "confidence_level": c.confidence_level,
+                "mapping_used": c.mapping_used,
+                "M_hm_equivalent_Msun": c.M_hm_equivalent,
+                "m_WDM_equivalent_keV": M_hm_to_wdm_mass(c.M_hm_equivalent) if c.M_hm_equivalent else None,
+                "constraint_type": c.constraint_type,
+                "z_lens": c.z_lens,
+                "notes": c.notes
+            })
+        return table
+
+    def evaluate_all(self, model_M_hm: float) -> Dict:
+        """
+        Evaluate all constraints against a model prediction.
 
         Parameters:
-            M_hm_model: Model prediction for half-mode mass in M_sun
+            model_M_hm: Model's half-mode mass in M_sun
 
         Returns:
-            Total log-likelihood
+            Dictionary with per-paper results and summary
         """
-        hard = self.get_hard_constraints()
-        if not hard:
-            return 0.0
+        results = []
+        n_passed = 0
+        n_violated = 0
+        n_not_comparable = 0
 
-        log_lik = 0.0
-        for constraint in hard:
-            log_lik += constraint.log_likelihood(M_hm_model)
+        for c in self.constraints:
+            status, details = c.evaluate(model_M_hm)
 
-        return log_lik
+            result = {
+                "paper": c.name,
+                "reference": c.reference,
+                "status": status.value,
+                "constraint_type": c.constraint_type,
+                "M_hm_limit": c.M_hm_equivalent,
+                "model_M_hm": model_M_hm,
+                **details
+            }
+            results.append(result)
 
-    def log_likelihood_all(self, M_hm_model: float) -> float:
+            if status == ConstraintStatus.PASSED:
+                n_passed += 1
+            elif status == ConstraintStatus.VIOLATED:
+                n_violated += 1
+            else:
+                n_not_comparable += 1
+
+        return {
+            "model_M_hm": model_M_hm,
+            "n_constraints": len(self.constraints),
+            "n_passed": n_passed,
+            "n_violated": n_violated,
+            "n_not_comparable": n_not_comparable,
+            "overall_consistent": n_violated == 0,
+            "constraints": results
+        }
+
+    def evaluate_constraints(self, M_hm_model: float,
+                            mode: str = "consistency",
+                            use_forecasts: bool = False) -> Dict:
         """
-        Compute log-likelihood from all constraints.
+        Backward-compatible method matching old interface.
+
+        Parameters:
+            M_hm_model: Model's half-mode mass in M_sun
+            mode: "consistency" (default) - just check bounds
+            use_forecasts: Ignored (no forecasts in this implementation)
+
+        Returns:
+            Dictionary with per-constraint results
         """
-        log_lik = 0.0
-        for constraint in self.subhalo_mf_constraints:
-            log_lik += constraint.log_likelihood(M_hm_model)
-        return log_lik
+        eval_result = self.evaluate_all(M_hm_model)
+
+        # Reformat to match old interface
+        constraints_formatted = []
+        for r in eval_result["constraints"]:
+            constraints_formatted.append({
+                "name": r["paper"],
+                "satisfied": r["status"] == "passed",
+                "type": r["constraint_type"],
+                "reference": r["reference"],
+                "details": r
+            })
+
+        return {
+            "mode": mode,
+            "overall_consistent": eval_result["overall_consistent"],
+            "constraints": constraints_formatted,
+            "message": f"{eval_result['n_passed']}/{eval_result['n_constraints']} constraints passed"
+        }
+
+    def is_consistent(self, M_hm_model: float, **kwargs) -> Tuple[bool, str]:
+        """Check if model is consistent with all constraints."""
+        result = self.evaluate_constraints(M_hm_model, **kwargs)
+        return result["overall_consistent"], result["message"]
 
     def summary(self) -> str:
-        """Return summary of constraints."""
-        lines = ["Strong Lensing Substructure Constraints", "=" * 50]
+        """Return human-readable summary of constraints."""
+        lines = [
+            "Strong Lensing Constraints (Per-Paper)",
+            "=" * 50,
+            "",
+            "MAPPING NOTE: WDM mass to M_hm uses:",
+            "  M_hm = 10^10 * (m_WDM/keV)^(-3.33) M_sun",
+            "  (Schneider et al. 2012 thermal relic relation)",
+            ""
+        ]
 
-        hard = self.get_hard_constraints()
-        lines.append(f"\nHARD constraints ({len(hard)}):")
-        for c in hard:
-            limit_type = "upper limit" if c.is_upper_limit else "detection"
-            lines.append(f"  - {c.name}: M_hm {'<' if c.is_upper_limit else '~'} "
-                        f"{c.M_hm_limit:.2e} M_sun ({limit_type})")
-            lines.append(f"    z_lens={c.z_lens:.2f}, Ref: {c.reference}")
-
-        forecast = self.get_forecast_constraints()
-        lines.append(f"\nFORECAST constraints ({len(forecast)}):")
-        for c in forecast:
-            lines.append(f"  - {c.name}: M_hm < {c.M_hm_limit:.2e} M_sun")
+        for c in self.constraints:
+            lines.append(f"[{c.name}]")
+            lines.append(f"  Reference: {c.reference}")
+            lines.append(f"  Reports: {c.reported_quantity} = {c.reported_value} {c.reported_units}")
+            lines.append(f"  Type: {c.constraint_type} at {c.confidence_level*100:.0f}% CL")
+            if c.M_hm_equivalent:
+                lines.append(f"  M_hm equivalent: {c.M_hm_equivalent:.2e} M_sun")
+            lines.append(f"  Mapping: {c.mapping_used}")
+            lines.append("")
 
         return "\n".join(lines)
 
-    def is_consistent(self, M_hm_model: float,
-                      use_forecasts: bool = False,
-                      mode: str = "consistency") -> Tuple[bool, str]:
-        """
-        Check if model is consistent with constraints.
 
-        Parameters:
-            M_hm_model: Model prediction for half-mode mass
-            use_forecasts: Include forecast constraints
-            mode: "consistency" (bounds) or "hard_likelihood"
-
-        Returns:
-            (is_consistent, message)
-        """
-        evaluation = self.evaluate_constraints(
-            M_hm_model,
-            mode=mode,
-            use_forecasts=use_forecasts
-        )
-        return evaluation["overall_consistent"], evaluation["message"]
-
-    def evaluate_constraints(self,
-                             M_hm_model: float,
-                             mode: str = "consistency",
-                             use_forecasts: bool = False) -> Dict:
-        """
-        Evaluate constraints individually and optionally compute a hard likelihood.
-
-        Returns:
-            Dict with keys:
-              - mode
-              - overall_consistent (bool)
-              - log_likelihood (float, if mode=="hard_likelihood")
-              - constraints: list of per-constraint dicts
-              - message: human-readable summary
-        """
-        mode = mode.lower()
-        constraints = (self.subhalo_mf_constraints if use_forecasts
-                       else self.get_hard_constraints())
-
-        applied = []
-        log_lik = 0.0
-        violations = []
-
-        for c in constraints:
-            bound = {
-                "type": "upper_limit" if c.is_upper_limit else "detection_bound",
-                "value": c.M_hm_limit,
-                "uncertainty": c.M_hm_uncertainty,
-            }
-
-            if c.is_upper_limit:
-                satisfied = M_hm_model <= c.M_hm_limit
-                detail = f"M_hm <= {c.M_hm_limit:.2e}"
-                sigma_distance = ((M_hm_model - c.M_hm_limit) /
-                                  max(c.M_hm_uncertainty, 1e-20))
-            else:
-                # Detection implies suppression scale must not overshoot this mass
-                satisfied = M_hm_model <= c.M_hm_limit + 2 * c.M_hm_uncertainty
-                detail = f"M_hm should not exceed {c.M_hm_limit:.2e} (detection scale)"
-                sigma_distance = ((M_hm_model - c.M_hm_limit) /
-                                  max(c.M_hm_uncertainty, 1e-20))
-
-            if mode == "hard_likelihood":
-                log_lik += c.log_likelihood(M_hm_model)
-
-            applied.append({
-                "name": c.name,
-                "type": c.constraint_type,
-                "reference": c.reference,
-                "satisfied": bool(satisfied),
-                "bound": bound,
-                "detail": detail,
-                "sigma_distance": sigma_distance,
-            })
-
-            if not satisfied:
-                violations.append(f"{c.name}: {detail} (model={M_hm_model:.2e})")
-
-        overall_consistent = (len(violations) == 0) if mode == "consistency" else True
-        message = "Model consistent with all constraints" if overall_consistent else "VIOLATIONS:\n" + "\n".join(violations)
-
-        return {
-            "mode": "hard_likelihood" if mode == "hard_likelihood" else "consistency",
-            "overall_consistent": overall_consistent,
-            "log_likelihood": log_lik if mode == "hard_likelihood" else None,
-            "constraints": applied,
-            "message": message,
-        }
-
-
-def convert_wdm_mass_to_M_hm(m_wdm_keV: float) -> float:
+def get_most_constraining_M_hm() -> float:
     """
-    Convert WDM particle mass to half-mode mass.
+    Return the most constraining M_hm upper limit from the literature.
 
-    The half-mode mass for thermal WDM is approximately:
-        M_hm ~ 10^10 * (m_wdm / keV)^(-3.3) M_sun
-
-    Reference: Schneider et al. 2012
-
-    Parameters:
-        m_wdm_keV: WDM particle mass in keV
-
-    Returns:
-        M_hm in M_sun
+    Currently: Enzi et al. 2021 with m_WDM > 6.3 keV -> M_hm < 2e7 M_sun
     """
-    return 1e10 * (m_wdm_keV)**(-3.33)
-
-
-def convert_M_hm_to_wdm_mass(M_hm: float) -> float:
-    """
-    Convert half-mode mass to equivalent WDM particle mass.
-
-    Parameters:
-        M_hm: Half-mode mass in M_sun
-
-    Returns:
-        m_wdm in keV
-    """
-    return (M_hm / 1e10)**(-1.0/3.33)
-
-
-def subhalo_mass_function_ratio(M_sub: np.ndarray,
-                                M_hm: float,
-                                alpha: float = -1.9,
-                                beta: float = 1.0,
-                                gamma: float = 2.7) -> np.ndarray:
-    """
-    Ratio of suppressed to CDM subhalo mass function.
-
-    dn/dM (suppressed) / dn/dM (CDM) = [1 + (M_hm / M)^beta]^(-gamma)
-
-    This is a common parameterization for WDM-like suppression.
-
-    Parameters:
-        M_sub: Subhalo masses in M_sun
-        M_hm: Half-mode mass in M_sun
-        alpha: CDM slope (not used in ratio, but for reference)
-        beta: Suppression steepness
-        gamma: Suppression amplitude
-
-    Returns:
-        Ratio array (1 for CDM, <1 for suppression)
-    """
-    M_sub = np.asarray(M_sub)
-    if M_hm <= 0:
-        return np.ones_like(M_sub)
-
-    ratio = (1 + (M_hm / M_sub)**beta)**(-gamma)
-    return ratio
-
-
-def lensing_signal_prediction(M_hm: float,
-                              z_lens: float = 0.5,
-                              f_sub_cdm: float = 0.01) -> Dict:
-    """
-    Predict lensing observables for a given M_hm.
-
-    Parameters:
-        M_hm: Half-mode mass in M_sun
-        z_lens: Lens redshift
-        f_sub_cdm: CDM substructure mass fraction
-
-    Returns:
-        Dictionary with predicted observables
-    """
-    # Mass range probed by lensing
-    M_min = 1e6  # Detection threshold
-    M_max = 1e10  # Upper bound
-
-    M_grid = np.logspace(np.log10(M_min), np.log10(M_max), 100)
-
-    # Suppression ratio
-    ratio = subhalo_mass_function_ratio(M_grid, M_hm)
-
-    # Effective substructure fraction
-    # Integrate suppression over the mass function
-    # Approximate: use geometric mean of ratio
-    avg_suppression = np.exp(np.mean(np.log(ratio)))
-    f_sub_suppressed = f_sub_cdm * avg_suppression
-
-    # Number of detectable subhalos
-    # Rough scaling: N_sub ∝ integral of dn/dM
-    N_sub_cdm = 1.0  # Normalized
-    N_sub_suppressed = N_sub_cdm * avg_suppression
-
-    # Flux ratio anomaly signal
-    # Simplified: larger suppression -> smaller anomaly
-    flux_anomaly_rms = 0.1 * avg_suppression**(0.5)  # Rough scaling
-
-    return {
-        "M_hm": M_hm,
-        "z_lens": z_lens,
-        "f_sub_suppressed": f_sub_suppressed,
-        "f_sub_ratio": avg_suppression,
-        "N_sub_ratio": N_sub_suppressed,
-        "flux_anomaly_rms": flux_anomaly_rms,
-        "detectable": M_hm < 1e8,  # Rough detectability threshold
-    }
+    return wdm_mass_to_M_hm(6.3)  # ~2e7 M_sun
