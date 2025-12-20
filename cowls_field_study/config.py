@@ -36,6 +36,11 @@ class FieldStudyConfig:
     hf_fraction: float = 0.35
     null_mode: str = "both"
     null_draws: int = 300
+    G_resample_global: int = 1000
+    G_shift_global: int = 500
+    allow_reduction: bool = False
+    max_workers: int | None = None
+    per_lens_null_B: int | None = None
 
     def theta_bin_edges(self) -> List[float]:
         """Return monotonically increasing theta bin edges in degrees."""

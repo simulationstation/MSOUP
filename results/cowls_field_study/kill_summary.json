@@ -4,6 +4,11 @@
   "n_lenses": 34,
   "empirical_p_null_resample": 0.0,
   "empirical_p_null_shift": 0.0,
+  "p_emp_resample": 0.0,
+  "p_emp_shift": 0.0,
+  "G_resample": null,
+  "G_shift": null,
+  "n_lenses_used": 34,
   "leave_one_out_min": 3.5442210752580077,
   "leave_one_out_median": 3.55988806429402,
   "leave_one_out_max": 3.8418938669422515,
@@ -13,6 +18,12 @@
   "strongest_proxy": "residual_rms",
   "strongest_proxy_rho": 0.4413487907573353,
   "low_m_dominance_rho": 1.0,
+  "low_m_dominance_p": null,
+  "low_m_dominance_pearson_r": 1.0,
+  "low_m_dominance_pearson_p": null,
   "jackknife_mean": 0.6282352941176469,
-  "jackknife_se": 0.09031976329351551
+  "jackknife_se": 0.09031976329351551,
+  "band_sign_consistency": null,
+  "band_variance_mean": null,
+  "band_corr_f150_f277": null
 }
