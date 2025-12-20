@@ -1,0 +1,18 @@
+{
+  "global_z_corr": 3.663209778643988,
+  "global_z_pow": -0.7031441990842862,
+  "n_lenses": 34,
+  "empirical_p_null_resample": 0.0,
+  "empirical_p_null_shift": 0.0,
+  "leave_one_out_min": 3.5442210752580077,
+  "leave_one_out_median": 3.55988806429402,
+  "leave_one_out_max": 3.8418938669422515,
+  "dominance_top1": 0.046816479400749074,
+  "dominance_top3": 0.13904494382022473,
+  "dominance_top5": 0.23080524344569292,
+  "strongest_proxy": "residual_rms",
+  "strongest_proxy_rho": 0.4413487907573353,
+  "low_m_dominance_rho": 1.0,
+  "jackknife_mean": 0.6282352941176469,
+  "jackknife_se": 0.09031976329351551
+}
