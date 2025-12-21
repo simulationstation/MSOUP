@@ -19,6 +19,9 @@ python run_all.py --smoke-test
 
 # Run full analysis
 python run_all.py
+
+# Run the ejection + decompression simulation (fast smoke)
+python -m msoup_ejection_sim.run --smoke
 ```
 
 ## Model Parameters
@@ -59,6 +62,25 @@ After running the pipeline, check `results/` for:
 - `fit_results.json` - Best-fit parameters and diagnostics
 - `rotation_curve_fits.png` - Visual comparison of fits
 - `constraint_space.png` - χ²/DOF vs M_hm with lensing limits
+
+## Msoup ejection + decompression module
+
+An auxiliary toy module lives in `msoup_ejection_sim/` and is calibrated to reproduce the required dual expansion readouts (H0≈67 early anchor, H0≈73 late ladder) via ejection + decompression dynamics.
+
+### CLI usage
+
+```bash
+# Smoke run (small grid)
+python -m msoup_ejection_sim.run --smoke
+
+# Full calibration (adjust --max-evals, grid, steps as needed)
+python -m msoup_ejection_sim.run --calibrate --max-evals 4000 --grid 256 --steps 400
+
+# Run with saved parameters
+python -m msoup_ejection_sim.run --params results/msoup_ejection_sim/best_params.json --grid 256 --steps 400
+```
+
+Outputs are saved to `results/msoup_ejection_sim/`, including `FINAL_REPORT.md`, best parameter JSON/CSV, and diagnostic figures.
 
 ## Data Sources
 
