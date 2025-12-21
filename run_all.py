@@ -440,6 +440,8 @@ def main():
                         help='Run quick validation (<5 min)')
     parser.add_argument('--skip-download', action='store_true',
                         help='Use synthetic data instead of downloading SPARC')
+    parser.add_argument('--run-ejection-sim', action='store_true',
+                        help='Also run the msoup_ejection_sim smoke scenario')
     args = parser.parse_args()
 
     if args.smoke_test:
@@ -470,6 +472,19 @@ def main():
     print(f"\nResults saved to: results/")
     print(f"  - fit_results.json")
     print(f"  - rotation_curve_fits.png")
+
+    if args.run_ejection_sim:
+        from msoup_ejection_sim.config import SimulationConfig
+        from msoup_ejection_sim.dynamics import run_simulation
+        from msoup_ejection_sim.report import generate_report
+
+        print("\n" + "="*60)
+        print("EJECTION + DECOMPRESSION SMOKE (optional)")
+        print("="*60)
+        sim_cfg = SimulationConfig(grid=96, steps=120, dt=1/120, seed=SEED)
+        sim = run_simulation(sim_cfg)
+        generate_report("results/msoup_ejection_sim", sim_cfg, sim, sim_cfg.to_dict(), calibration_used=False)
+        print("Optional ejection simulation completed; report in results/msoup_ejection_sim")
 
     return summary
 

@@ -1,0 +1,104 @@
+"""Calibration routine for the ejection + decompression simulation."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from typing import Dict, List
+
+from .config import SimulationConfig, CalibrationConfig, PARAM_RANGES
+from .dynamics import run_simulation
+from .inference import infer_expansion, morphology_stats
+
+
+def _build_config(base: SimulationConfig, params: Dict, grid: int, steps: int, seed: int) -> SimulationConfig:
+    cfg_dict = base.to_dict()
+    cfg_dict.update(params)
+    cfg_dict.update({"grid": grid, "steps": steps, "seed": seed, "dt": 1.0 / steps})
+    return SimulationConfig.from_dict(cfg_dict)
+
+
+def _loss(diagnostics: Dict[str, float], morph: Dict[str, float]) -> float:
+    w1, w2, w3 = 1.0, 1.0, 5.0
+    loss = w1 * (diagnostics["H0_early"] - 67.0) ** 2 + w2 * (diagnostics["H0_late"] - 73.0) ** 2
+    penalty = 0.0
+    if not 0.02 <= morph["void_fraction"] <= 0.85:
+        penalty += abs(morph["void_fraction"] - 0.2)
+    if not 0.0 <= morph["high_density_fraction"] <= 0.35:
+        penalty += abs(morph["high_density_fraction"] - 0.15)
+    if not 0.5 <= morph["structure_amp"] <= 2.0:
+        penalty += abs(morph["structure_amp"] - 1.0)
+    loss += w3 * penalty
+    return float(loss)
+
+
+def _sample_params(rng: np.random.Generator) -> Dict[str, float]:
+    return {k: rng.uniform(low, high) for k, (low, high) in PARAM_RANGES.items()}
+
+
+def _refine(rng: np.random.Generator, best: Dict[str, float], scale: float = 0.15) -> Dict[str, float]:
+    refined = dict(best)
+    for key in ["beta", "beta_loc", "gamma0", "tau_dm3_0"]:
+        low, high = PARAM_RANGES[key]
+        step = (high - low) * scale
+        refined[key] = np.clip(best[key] + rng.normal(scale=step * 0.5), low, high)
+    return refined
+
+
+def run_calibration(base_cfg: SimulationConfig, calib_cfg: CalibrationConfig, results_dir: str) -> Dict[str, float]:
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(base_cfg.seed)
+    records: List[Dict] = []
+    best_loss = np.inf
+    best_params: Dict[str, float] = {}
+
+    evals = calib_cfg.max_evals if not calib_cfg.smoke else min(300, calib_cfg.max_evals)
+    grid = calib_cfg.grid_calib if not calib_cfg.smoke else max(64, calib_cfg.grid_calib // 2)
+    steps = calib_cfg.steps_calib if not calib_cfg.smoke else max(80, calib_cfg.steps_calib // 2)
+
+    for i in range(evals):
+        params = _sample_params(rng)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + i)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _loss(diagnostics, morph)
+
+        record = {**params, **diagnostics, **morph, "loss": loss}
+        records.append(record)
+
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    # local refinement around best
+    for j in range(calib_cfg.refine_steps if not calib_cfg.smoke else 5):
+        params = _refine(rng, best_params)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + evals + j)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _loss(diagnostics, morph)
+        record = {**params, **diagnostics, **morph, "loss": loss}
+        records.append(record)
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    best_candidates = sorted(records, key=lambda r: r["loss"])[:calib_cfg.n_keep]
+    df = pd.DataFrame(best_candidates)
+    df.to_csv(f"{results_dir}/best_candidates.csv", index=False)
+
+    with open(f"{results_dir}/best_params.json", "w", encoding="utf-8") as f:
+        json.dump(best_params, f, indent=2)
+
+    full_cfg = _build_config(base_cfg, best_params, base_cfg.grid, base_cfg.steps, seed=base_cfg.seed)
+    final_sim = run_simulation(full_cfg)
+    diagnostics = infer_expansion(full_cfg, final_sim.history, final_sim.final_fields)
+    morph = morphology_stats(final_sim.final_fields, full_cfg)
+    summary = {"params": best_params, "diagnostics": diagnostics, "morphology": morph}
+    with open(f"{results_dir}/calibration_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    return best_params

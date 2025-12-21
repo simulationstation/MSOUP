@@ -64,6 +64,26 @@ data/**/__pycache__/
 
 # Results cache
 results/**/cache/
+# Simulation and analysis outputs (generated locally, not versioned)
+results/
+**/results/
+figures/
+**/figures/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.fits
+*.tar
+*.gz
+*.zip
 
 # OS
 .DS_Store
