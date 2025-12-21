@@ -159,3 +159,228 @@ def run_calibration(base_cfg: SimulationConfig, calib_cfg: CalibrationConfig, re
         json.dump(summary, f, indent=2)
 
     return best_params
+
+
+def _stage1_loss(diagnostics: Dict[str, float], morph: Dict[str, float]) -> float:
+    """Stage 1 loss: ONLY fit H0_early ≈ 67 plus morphology constraints.
+
+    CRITICAL: H0_late is NOT included in this loss function.
+    This allows us to test whether the late-time effect is emergent.
+    """
+    w1, w3 = 1.0, 5.0
+    # ONLY H0_early - no H0_late term at all
+    loss = w1 * (diagnostics["H0_early"] - 67.0) ** 2
+    penalty = 0.0
+    if not 0.02 <= morph["void_fraction"] <= 0.85:
+        penalty += abs(morph["void_fraction"] - 0.4)
+    if not 0.0 <= morph["high_density_fraction"] <= 0.35:
+        penalty += abs(morph["high_density_fraction"] - 0.1)
+    if not 0.5 <= morph["structure_amp"] <= 2.0:
+        penalty += abs(morph["structure_amp"] - 1.0)
+    loss += w3 * penalty
+    return float(loss)
+
+
+def _stage2_loss(diagnostics: Dict[str, float], morph: Dict[str, float]) -> float:
+    """Stage 2 loss: Fit BOTH H0_early ≈ 67 and H0_late ≈ 73."""
+    w1, w2, w3 = 1.0, 1.0, 5.0
+    loss = w1 * (diagnostics["H0_early"] - 67.0) ** 2 + w2 * (diagnostics["H0_late"] - 73.0) ** 2
+    penalty = 0.0
+    if not 0.02 <= morph["void_fraction"] <= 0.85:
+        penalty += abs(morph["void_fraction"] - 0.4)
+    if not 0.0 <= morph["high_density_fraction"] <= 0.35:
+        penalty += abs(morph["high_density_fraction"] - 0.1)
+    if not 0.5 <= morph["structure_amp"] <= 2.0:
+        penalty += abs(morph["structure_amp"] - 1.0)
+    loss += w3 * penalty
+    return float(loss)
+
+
+def run_stage1_calibration(base_cfg: SimulationConfig, calib_cfg: CalibrationConfig,
+                           results_dir: str) -> Dict:
+    """Stage 1 calibration: Fit ONLY to H0_early ≈ 67.
+
+    Returns both the best params AND the emergent H0_late prediction.
+    This is the critical test: does H0_late naturally land near 73?
+    """
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(base_cfg.seed)
+    records: List[Dict] = []
+    best_loss = np.inf
+    best_params: Dict[str, float] = {}
+
+    evals = calib_cfg.max_evals if not calib_cfg.smoke else min(300, calib_cfg.max_evals)
+    grid = calib_cfg.grid_calib if not calib_cfg.smoke else max(64, calib_cfg.grid_calib // 2)
+    steps = calib_cfg.steps_calib if not calib_cfg.smoke else max(80, calib_cfg.steps_calib // 2)
+
+    for i in range(evals):
+        params = _sample_params(rng)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + i)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _stage1_loss(diagnostics, morph)
+
+        record = {**params, **diagnostics, **morph, "loss": loss, "stage": 1}
+        records.append(record)
+
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    # Local refinement - still using stage1 loss
+    for j in range(calib_cfg.refine_steps if not calib_cfg.smoke else 5):
+        params = _refine(rng, best_params)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + evals + j)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _stage1_loss(diagnostics, morph)
+        record = {**params, **diagnostics, **morph, "loss": loss, "stage": 1}
+        records.append(record)
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    # Save candidates
+    best_candidates = sorted(records, key=lambda r: r["loss"])[:calib_cfg.n_keep]
+    df = pd.DataFrame(best_candidates)
+    df.to_csv(f"{results_dir}/stage1_candidates.csv", index=False)
+
+    with open(f"{results_dir}/stage1_params.json", "w", encoding="utf-8") as f:
+        json.dump(best_params, f, indent=2)
+
+    # Run at full resolution to get final diagnostics
+    full_cfg = _build_config(base_cfg, best_params, base_cfg.grid, base_cfg.steps, seed=base_cfg.seed)
+    final_sim = run_simulation(full_cfg)
+    diagnostics = infer_expansion(full_cfg, final_sim.history, final_sim.final_fields)
+    morph = morphology_stats(final_sim.final_fields, full_cfg)
+
+    # The key result: H0_late is an OUT-OF-SAMPLE prediction here
+    result = {
+        "stage": 1,
+        "params": best_params,
+        "diagnostics": diagnostics,
+        "morphology": morph,
+        "H0_early_target": 67.0,
+        "H0_early_achieved": diagnostics["H0_early"],
+        "H0_late_emergent": diagnostics["H0_late"],  # NOT targeted!
+        "Delta_H0_emergent": diagnostics["Delta_H0"],
+        "H0_late_deviation_from_73": diagnostics["H0_late"] - 73.0,
+        "calibration_grid": grid,
+        "calibration_steps": steps,
+        "validation_grid": base_cfg.grid,
+        "validation_steps": base_cfg.steps,
+    }
+
+    with open(f"{results_dir}/stage1_summary.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    return result
+
+
+def run_stage2_calibration(base_cfg: SimulationConfig, calib_cfg: CalibrationConfig,
+                           results_dir: str, stage1_params: Dict[str, float] = None) -> Dict:
+    """Stage 2 calibration: Fit BOTH H0_early and H0_late.
+
+    Optionally starts from Stage 1 parameters.
+    Reports how much extra tuning was needed beyond Stage 1.
+    """
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(base_cfg.seed + 5000)
+    records: List[Dict] = []
+    best_loss = np.inf
+    best_params: Dict[str, float] = stage1_params.copy() if stage1_params else {}
+
+    evals = calib_cfg.max_evals if not calib_cfg.smoke else min(300, calib_cfg.max_evals)
+    grid = calib_cfg.grid_calib if not calib_cfg.smoke else max(64, calib_cfg.grid_calib // 2)
+    steps = calib_cfg.steps_calib if not calib_cfg.smoke else max(80, calib_cfg.steps_calib // 2)
+
+    # If starting from Stage 1, first evaluate those params
+    if stage1_params:
+        cfg = _build_config(base_cfg, stage1_params, grid, steps, seed=base_cfg.seed)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        initial_loss = _stage2_loss(diagnostics, morph)
+        best_loss = initial_loss
+        records.append({**stage1_params, **diagnostics, **morph, "loss": initial_loss, "stage": 2})
+
+    # Explore around stage1 params or from scratch
+    for i in range(evals):
+        if stage1_params and i < evals // 2:
+            # First half: refine from stage1
+            params = _refine(rng, best_params, scale=0.2)
+        else:
+            # Second half: broader search
+            params = _sample_params(rng)
+
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + i)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _stage2_loss(diagnostics, morph)
+
+        record = {**params, **diagnostics, **morph, "loss": loss, "stage": 2}
+        records.append(record)
+
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    # Final refinement
+    for j in range(calib_cfg.refine_steps if not calib_cfg.smoke else 5):
+        params = _refine(rng, best_params)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + evals + j)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _stage2_loss(diagnostics, morph)
+        record = {**params, **diagnostics, **morph, "loss": loss, "stage": 2}
+        records.append(record)
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+
+    # Save candidates
+    best_candidates = sorted(records, key=lambda r: r["loss"])[:calib_cfg.n_keep]
+    df = pd.DataFrame(best_candidates)
+    df.to_csv(f"{results_dir}/stage2_candidates.csv", index=False)
+
+    with open(f"{results_dir}/stage2_params.json", "w", encoding="utf-8") as f:
+        json.dump(best_params, f, indent=2)
+
+    # Run at full resolution
+    full_cfg = _build_config(base_cfg, best_params, base_cfg.grid, base_cfg.steps, seed=base_cfg.seed)
+    final_sim = run_simulation(full_cfg)
+    diagnostics = infer_expansion(full_cfg, final_sim.history, final_sim.final_fields)
+    morph = morphology_stats(final_sim.final_fields, full_cfg)
+
+    # Compute how much tuning was needed if we have stage1
+    param_drift = {}
+    if stage1_params:
+        for k in ["beta", "beta_loc", "gamma0", "tau_dm3_0", "dm3_to_A", "H_base"]:
+            if k in stage1_params and k in best_params:
+                param_drift[k] = best_params[k] - stage1_params[k]
+
+    result = {
+        "stage": 2,
+        "params": best_params,
+        "diagnostics": diagnostics,
+        "morphology": morph,
+        "H0_early_target": 67.0,
+        "H0_late_target": 73.0,
+        "H0_early_achieved": diagnostics["H0_early"],
+        "H0_late_achieved": diagnostics["H0_late"],
+        "Delta_H0_achieved": diagnostics["Delta_H0"],
+        "param_drift_from_stage1": param_drift,
+        "calibration_grid": grid,
+        "calibration_steps": steps,
+        "validation_grid": base_cfg.grid,
+        "validation_steps": base_cfg.steps,
+    }
+
+    with open(f"{results_dir}/stage2_summary.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    return result
