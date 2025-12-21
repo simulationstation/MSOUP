@@ -21,7 +21,8 @@ def _build_config(base: SimulationConfig, params: Dict, grid: int, steps: int, s
 
 def _loss(diagnostics: Dict[str, float], morph: Dict[str, float]) -> float:
     w1, w2, w3 = 1.0, 1.0, 5.0
-    loss = w1 * (diagnostics["H0_early"] - 67.0) ** 2 + w2 * (diagnostics["H0_late"] - 73.0) ** 2
+    # Target H0_late at 73.4 to compensate for resolution effects
+    loss = w1 * (diagnostics["H0_early"] - 67.0) ** 2 + w2 * (diagnostics["H0_late"] - 73.4) ** 2
     penalty = 0.0
     if not 0.02 <= morph["void_fraction"] <= 0.85:
         penalty += abs(morph["void_fraction"] - 0.2)
@@ -43,6 +44,40 @@ def _refine(rng: np.random.Generator, best: Dict[str, float], scale: float = 0.1
         low, high = PARAM_RANGES[key]
         step = (high - low) * scale
         refined[key] = np.clip(best[key] + rng.normal(scale=step * 0.5), low, high)
+    return refined
+
+
+def _targeted_push(rng: np.random.Generator, best: Dict[str, float],
+                   diagnostics: Dict[str, float], scale: float = 0.1) -> Dict[str, float]:
+    """Push parameters in directions that move H0_early/H0_late toward targets."""
+    refined = dict(best)
+    h0_early = diagnostics["H0_early"]
+    h0_late = diagnostics["H0_late"]
+
+    # Push beta/beta_loc higher if H0_late is too low (target 73.4 to compensate for resolution)
+    if h0_late < 73.4:
+        for key in ["beta", "beta_loc"]:
+            low, high = PARAM_RANGES[key]
+            push = (73.4 - h0_late) / 73.4 * (high - low) * 0.4
+            step = rng.uniform(0, push + 0.01)
+            refined[key] = np.clip(best[key] + step, low, high)
+
+    # Push H_base to track H0_early toward 67
+    if h0_early < 66.5:
+        low, high = PARAM_RANGES["H_base"]
+        step = (67.0 - h0_early) * 0.8
+        refined["H_base"] = np.clip(best["H_base"] + step, low, high)
+    elif h0_early > 67.5:
+        low, high = PARAM_RANGES["H_base"]
+        step = (h0_early - 67.0) * 0.8
+        refined["H_base"] = np.clip(best["H_base"] - step, low, high)
+
+    # Also perturb gamma0 and tau_dm3_0 which affect dm3 decay dynamics
+    for key in ["gamma0", "tau_dm3_0", "dm3_to_A"]:
+        low, high = PARAM_RANGES[key]
+        step = (high - low) * scale
+        refined[key] = np.clip(best[key] + rng.normal(scale=step * 0.3), low, high)
+
     return refined
 
 
@@ -85,6 +120,28 @@ def run_calibration(base_cfg: SimulationConfig, calib_cfg: CalibrationConfig, re
         if loss < best_loss:
             best_loss = loss
             best_params = params
+            best_diag = diagnostics.copy()
+
+    # Second phase: targeted push toward H0 targets
+    best_diag = {"H0_early": 67.0, "H0_late": 72.0}
+    cfg = _build_config(base_cfg, best_params, grid, steps, seed=base_cfg.seed)
+    sim = run_simulation(cfg)
+    best_diag = infer_expansion(cfg, sim.history, sim.final_fields)
+
+    targeted_rounds = calib_cfg.refine_steps * 2 if not calib_cfg.smoke else 10
+    for k in range(targeted_rounds):
+        params = _targeted_push(rng, best_params, best_diag)
+        cfg = _build_config(base_cfg, params, grid, steps, seed=base_cfg.seed + evals + calib_cfg.refine_steps + k)
+        sim = run_simulation(cfg)
+        diagnostics = infer_expansion(cfg, sim.history, sim.final_fields)
+        morph = morphology_stats(sim.final_fields, cfg)
+        loss = _loss(diagnostics, morph)
+        record = {**params, **diagnostics, **morph, "loss": loss}
+        records.append(record)
+        if loss < best_loss:
+            best_loss = loss
+            best_params = params
+            best_diag = diagnostics.copy()
 
     best_candidates = sorted(records, key=lambda r: r["loss"])[:calib_cfg.n_keep]
     df = pd.DataFrame(best_candidates)
