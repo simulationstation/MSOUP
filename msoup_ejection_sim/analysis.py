@@ -1,22 +1,36 @@
 """Scientific analysis runners for the ejection simulation.
 
 This module provides:
-- Multi-seed robustness analysis
+- Multi-seed robustness analysis with train/val split
 - Resolution convergence testing
 - Non-targeted predictions (environment dependence, mechanism fingerprints)
-- Parameter identifiability scans
+- Enhanced parameter identifiability scans with importance analysis
+- Multi-readout comparison
+- Amplifier kill tests
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 
 from .config import SimulationConfig, PARAM_RANGES
 from .dynamics import run_simulation, SimulationResult
-from .inference import infer_expansion, morphology_stats
+from .inference import infer_expansion, morphology_stats, infer_expansion_multireadout
+
+
+# === Core Parameters for Identifiability ===
+# These are ALL parameters that materially affect ΔH0 and H0_late
+# v3: Now includes K field parameters (tau_K0, chi_K)
+IDENTIFIABILITY_PARAMS = [
+    "beta", "beta_loc", "gamma0", "tau_dm3_0", "dm3_to_A", "dm3_to_lt2",
+    "H_base", "chi_B", "A0", "A_floor", "k_relax", "k_pin",
+    "pA", "pR", "q_obs", "b_B", "f_dm3_0", "g_dm",
+    # v3: K field parameters (scanned)
+    "tau_K0", "chi_K"
+]
 
 
 @dataclass
@@ -32,6 +46,15 @@ class SeedRunResult:
     structure_amp: float
     X_V_final: float
     mean_dm3_final: float
+    # Multi-readout results
+    H0_late_volume: float = 0.0
+    H0_late_tracer: float = 0.0
+    Delta_H0_volume: float = 0.0
+    Delta_H0_tracer: float = 0.0
+    # v3: K field diagnostics
+    K_release_time: Optional[float] = None
+    wlt2_onset_time: Optional[float] = None
+    mean_K_final: float = 0.0
 
 
 @dataclass
@@ -52,10 +75,33 @@ class MultiSeedSummary:
     structure_amp_std: float
     quantiles: Dict[str, Dict[str, float]]
     individual_results: List[Dict]
+    # Multi-readout stats
+    Delta_H0_volume_mean: float = 0.0
+    Delta_H0_volume_std: float = 0.0
+    Delta_H0_tracer_mean: float = 0.0
+    Delta_H0_tracer_std: float = 0.0
+    # v3: K field stats
+    K_release_time_mean: Optional[float] = None
+    K_release_time_std: Optional[float] = None
+    wlt2_onset_time_mean: Optional[float] = None
+    wlt2_onset_time_std: Optional[float] = None
+    mean_K_final_mean: float = 0.0
+    mean_K_final_std: float = 0.0
+
+
+@dataclass
+class TrainValSplit:
+    """Train/validation split for Stage-1."""
+    train_seeds: List[int]
+    val_seeds: List[int]
+    stress_seeds: List[int]  # Different RNG stream
+    train_results: MultiSeedSummary
+    val_results: MultiSeedSummary
+    stress_results: MultiSeedSummary
 
 
 def run_multiseed(cfg: SimulationConfig, n_seeds: int = 50,
-                  base_seed: int = 100) -> MultiSeedSummary:
+                  base_seed: int = 100, include_multireadout: bool = True) -> MultiSeedSummary:
     """Run simulation across multiple seeds and collect statistics."""
     results: List[SeedRunResult] = []
 
@@ -68,6 +114,25 @@ def run_multiseed(cfg: SimulationConfig, n_seeds: int = 50,
         diag = infer_expansion(cfg_copy, sim.history, sim.final_fields)
         morph = morphology_stats(sim.final_fields, cfg_copy)
 
+        # Multi-readout diagnostics
+        h0_late_volume = diag["H0_late"]
+        h0_late_tracer = diag["H0_late"]
+        delta_volume = diag["Delta_H0"]
+        delta_tracer = diag["Delta_H0"]
+
+        if include_multireadout:
+            multi_diag = infer_expansion_multireadout(cfg_copy, sim.history, sim.final_fields)
+            h0_late_volume = multi_diag["volume"]["H0_late"]
+            h0_late_tracer = multi_diag["tracer"]["H0_late"]
+            delta_volume = multi_diag["volume"]["Delta_H0"]
+            delta_tracer = multi_diag["tracer"]["Delta_H0"]
+
+        # v3: Extract K diagnostics
+        K_diag = sim.K_diagnostics or {}
+        K_release_time = K_diag.get("K_release_time")
+        wlt2_onset_time = K_diag.get("wlt2_onset_time")
+        mean_K_final = K_diag.get("mean_K_final", 0.0)
+
         result = SeedRunResult(
             seed=seed,
             H0_early=diag["H0_early"],
@@ -79,6 +144,13 @@ def run_multiseed(cfg: SimulationConfig, n_seeds: int = 50,
             structure_amp=morph["structure_amp"],
             X_V_final=float(sim.history["X_V"][-1]),
             mean_dm3_final=float(sim.history["mean_dm3"][-1]),
+            H0_late_volume=h0_late_volume,
+            H0_late_tracer=h0_late_tracer,
+            Delta_H0_volume=delta_volume,
+            Delta_H0_tracer=delta_tracer,
+            K_release_time=K_release_time,
+            wlt2_onset_time=wlt2_onset_time,
+            mean_K_final=mean_K_final,
         )
         results.append(result)
 
@@ -89,6 +161,13 @@ def run_multiseed(cfg: SimulationConfig, n_seeds: int = 50,
     delta_h0 = np.array([r.Delta_H0 for r in results])
     void_frac = np.array([r.void_fraction for r in results])
     struct_amp = np.array([r.structure_amp for r in results])
+    delta_volume = np.array([r.Delta_H0_volume for r in results])
+    delta_tracer = np.array([r.Delta_H0_tracer for r in results])
+
+    # v3: K diagnostics aggregation
+    K_release_times = [r.K_release_time for r in results if r.K_release_time is not None]
+    wlt2_onset_times = [r.wlt2_onset_time for r in results if r.wlt2_onset_time is not None]
+    mean_K_finals = np.array([r.mean_K_final for r in results])
 
     quantile_pcts = [5, 25, 50, 75, 95]
     quantiles = {
@@ -113,6 +192,39 @@ def run_multiseed(cfg: SimulationConfig, n_seeds: int = 50,
         structure_amp_std=float(np.std(struct_amp)),
         quantiles=quantiles,
         individual_results=[asdict(r) for r in results],
+        Delta_H0_volume_mean=float(np.mean(delta_volume)),
+        Delta_H0_volume_std=float(np.std(delta_volume)),
+        Delta_H0_tracer_mean=float(np.mean(delta_tracer)),
+        Delta_H0_tracer_std=float(np.std(delta_tracer)),
+        # v3: K diagnostics
+        K_release_time_mean=float(np.mean(K_release_times)) if K_release_times else None,
+        K_release_time_std=float(np.std(K_release_times)) if len(K_release_times) > 1 else None,
+        wlt2_onset_time_mean=float(np.mean(wlt2_onset_times)) if wlt2_onset_times else None,
+        wlt2_onset_time_std=float(np.std(wlt2_onset_times)) if len(wlt2_onset_times) > 1 else None,
+        mean_K_final_mean=float(np.mean(mean_K_finals)),
+        mean_K_final_std=float(np.std(mean_K_finals)),
+    )
+
+
+def run_train_val_split(cfg: SimulationConfig, n_train: int = 10, n_val: int = 40,
+                        n_stress: int = 10) -> TrainValSplit:
+    """Run train/val/stress split for Stage-1 validation.
+
+    Train seeds: base 100-109
+    Val seeds: base 200-239
+    Stress seeds: base 5000-5009 (different RNG stream)
+    """
+    train_summary = run_multiseed(cfg, n_seeds=n_train, base_seed=100)
+    val_summary = run_multiseed(cfg, n_seeds=n_val, base_seed=200)
+    stress_summary = run_multiseed(cfg, n_seeds=n_stress, base_seed=5000)
+
+    return TrainValSplit(
+        train_seeds=list(range(100, 100 + n_train)),
+        val_seeds=list(range(200, 200 + n_val)),
+        stress_seeds=list(range(5000, 5000 + n_stress)),
+        train_results=train_summary,
+        val_results=val_summary,
+        stress_results=stress_summary,
     )
 
 
@@ -144,10 +256,7 @@ class ConvergenceSummary:
 
 def run_convergence(cfg: SimulationConfig,
                     resolutions: List[Tuple[int, int]] = None) -> ConvergenceSummary:
-    """Run simulation at multiple resolutions to test convergence.
-
-    Default resolutions: (128, 250), (256, 400), (384, 600)
-    """
+    """Run simulation at multiple resolutions to test convergence."""
     if resolutions is None:
         resolutions = [(128, 250), (256, 400), (384, 600)]
 
@@ -181,20 +290,16 @@ def run_convergence(cfg: SimulationConfig,
         )
         points.append(point)
 
-    # Compute drift between lowest and highest resolution
+    # Compute drift
     if len(points) >= 2:
         h0_early_drift = abs(points[-1].H0_early - points[0].H0_early)
         h0_late_drift = abs(points[-1].H0_late - points[0].H0_late)
         delta_h0_drift = abs(points[-1].Delta_H0 - points[0].Delta_H0)
     else:
-        h0_early_drift = 0.0
-        h0_late_drift = 0.0
-        delta_h0_drift = 0.0
+        h0_early_drift = h0_late_drift = delta_h0_drift = 0.0
 
-    threshold = 0.5  # Convergence threshold
-    converged = (h0_early_drift < threshold and
-                 h0_late_drift < threshold and
-                 delta_h0_drift < threshold)
+    threshold = 0.5
+    converged = (h0_early_drift < threshold and h0_late_drift < threshold and delta_h0_drift < threshold)
 
     return ConvergenceSummary(
         points=[asdict(p) for p in points],
@@ -207,188 +312,92 @@ def run_convergence(cfg: SimulationConfig,
 
 
 @dataclass
-class EnvironmentCurve:
-    """Binned relationship between H_local and environment."""
-    bin_centers: List[float]
-    H_local_mean: List[float]
-    H_local_std: List[float]
-    A_mean: List[float]
-    wlt2_mean: List[float]
-    n_per_bin: List[int]
-
-
-def compute_environment_dependence(cfg: SimulationConfig,
-                                   sim: SimulationResult,
-                                   n_bins: int = 10) -> Dict[str, EnvironmentCurve]:
-    """Compute binned relationships at final epoch.
-
-    Returns curves for:
-    - H_local vs density percentile
-    - H_local vs binding proxy B percentile
-    """
-    final = sim.final_fields
-    rho_tot = final["rho_b"] + cfg.g_dm * final["rho_dm3"]
-    A = final["A"]
-    wlt2 = final["wlt2"]
-    B = final["B"]
-    rho_mem = final["rho_mem"]
-
-    # Compute H_local for each cell
-    X_V_final = float(sim.history["X_V"][-1])
-    H_local = cfg.H_base * (1.0 + cfg.beta * X_V_final) * (1.0 + cfg.beta_loc * (1.0 - A))
-
-    curves = {}
-
-    # Density percentile curve
-    density_percentiles = np.percentile(rho_tot.flatten(), np.linspace(0, 100, n_bins + 1))
-    bin_centers_density = []
-    H_mean_density = []
-    H_std_density = []
-    A_mean_density = []
-    wlt2_mean_density = []
-    n_per_bin_density = []
-
-    for i in range(n_bins):
-        low, high = density_percentiles[i], density_percentiles[i + 1]
-        mask = (rho_tot >= low) & (rho_tot < high) if i < n_bins - 1 else (rho_tot >= low)
-        if mask.sum() > 0:
-            bin_centers_density.append(float((i + 0.5) * 10))  # percentile center
-            H_mean_density.append(float(np.mean(H_local[mask])))
-            H_std_density.append(float(np.std(H_local[mask])))
-            A_mean_density.append(float(np.mean(A[mask])))
-            wlt2_mean_density.append(float(np.mean(wlt2[mask])))
-            n_per_bin_density.append(int(mask.sum()))
-
-    curves["density"] = EnvironmentCurve(
-        bin_centers=bin_centers_density,
-        H_local_mean=H_mean_density,
-        H_local_std=H_std_density,
-        A_mean=A_mean_density,
-        wlt2_mean=wlt2_mean_density,
-        n_per_bin=n_per_bin_density,
-    )
-
-    # Binding percentile curve
-    B_percentiles = np.percentile(B.flatten(), np.linspace(0, 100, n_bins + 1))
-    bin_centers_B = []
-    H_mean_B = []
-    H_std_B = []
-    A_mean_B = []
-    wlt2_mean_B = []
-    n_per_bin_B = []
-
-    for i in range(n_bins):
-        low, high = B_percentiles[i], B_percentiles[i + 1]
-        mask = (B >= low) & (B < high) if i < n_bins - 1 else (B >= low)
-        if mask.sum() > 0:
-            bin_centers_B.append(float((i + 0.5) * 10))
-            H_mean_B.append(float(np.mean(H_local[mask])))
-            H_std_B.append(float(np.std(H_local[mask])))
-            A_mean_B.append(float(np.mean(A[mask])))
-            wlt2_mean_B.append(float(np.mean(wlt2[mask])))
-            n_per_bin_B.append(int(mask.sum()))
-
-    curves["binding"] = EnvironmentCurve(
-        bin_centers=bin_centers_B,
-        H_local_mean=H_mean_B,
-        H_local_std=H_std_B,
-        A_mean=A_mean_B,
-        wlt2_mean=wlt2_mean_B,
-        n_per_bin=n_per_bin_B,
-    )
-
-    return {k: asdict(v) for k, v in curves.items()}
-
-
-@dataclass
-class MechanismFingerprint:
-    """Correlation statistics for mechanism fingerprinting."""
-    dm3_decay_A_increase_corr: float
-    dm3_pockets_H_hotspots_corr: float
-    dm3_decay_wlt2_corr: float
-    n_cells: int
-
-
-def compute_mechanism_fingerprints(cfg: SimulationConfig,
-                                   sim: SimulationResult) -> MechanismFingerprint:
-    """Compute correlations to verify mechanism predictions.
-
-    - dm3 decay history proxy vs A increase
-    - dm3 pockets vs late-time H_local hotspots
-    """
-    # Get initial and final fields
-    t0_snap = sim.snapshots.get("t0", {})
-    final = sim.final_fields
-
-    dm3_initial = t0_snap.get("rho_dm3", np.ones_like(final["rho_dm3"]) * cfg.f_dm3_0)
-    dm3_final = final["rho_dm3"]
-    A_initial = t0_snap.get("A", np.ones_like(final["A"]) * cfg.A0)
-    A_final = final["A"]
-    wlt2_final = final["wlt2"]
-
-    # Compute proxies
-    dm3_decay = (dm3_initial - dm3_final).flatten()  # How much dm3 decayed
-    A_increase = (A_final - A_initial).flatten()  # How much A increased (should be small/negative)
-
-    # dm3 pockets: where dm3 was initially high
-    dm3_pockets = dm3_initial.flatten()
-
-    # H_local hotspots
-    X_V_final = float(sim.history["X_V"][-1])
-    H_local = cfg.H_base * (1.0 + cfg.beta * X_V_final) * (1.0 + cfg.beta_loc * (1.0 - A_final))
-    H_hotspots = H_local.flatten()
-
-    # Compute correlations (handle edge cases)
-    def safe_corr(x, y):
-        if np.std(x) < 1e-10 or np.std(y) < 1e-10:
-            return 0.0
-        return float(np.corrcoef(x, y)[0, 1])
-
-    corr_dm3_A = safe_corr(dm3_decay, A_increase)
-    corr_dm3_H = safe_corr(dm3_pockets, H_hotspots)
-    corr_dm3_wlt2 = safe_corr(dm3_decay, wlt2_final.flatten())
-
-    return MechanismFingerprint(
-        dm3_decay_A_increase_corr=corr_dm3_A,
-        dm3_pockets_H_hotspots_corr=corr_dm3_H,
-        dm3_decay_wlt2_corr=corr_dm3_wlt2,
-        n_cells=int(dm3_decay.size),
-    )
+class ParameterImportance:
+    """Importance of a parameter for a target metric."""
+    param: str
+    importance: float  # Absolute importance (variance explained)
+    direction: float   # +1 if positive correlation, -1 if negative
+    correlation: float # Pearson correlation
 
 
 @dataclass
 class IdentifiabilityResult:
-    """Result from identifiability scan."""
+    """Enhanced identifiability scan result."""
     n_samples: int
     n_stage1_valid: int
     n_stage2_valid: int
     stage1_tolerance: float
     stage2_tolerance: float
+    stage1_acceptance_rate: float
+    stage2_acceptance_rate: float
+    stage2_fine_tuning_metric: float  # Log10 of acceptance rate (negative = fine-tuned)
     param_ranges_explored: Dict[str, Tuple[float, float]]
     valid_samples: List[Dict]
     corner_data: Dict[str, List[float]]
+    # Importance analysis
+    H0_late_importance: List[Dict]  # Top contributors to H0_late variance
+    Delta_H0_importance: List[Dict]  # Top contributors to ΔH0 variance
+    # Stage-specific importance
+    stage1_Delta_H0_importance: List[Dict]
+    stage2_Delta_H0_importance: List[Dict]
+
+
+def compute_permutation_importance(corner_data: Dict, target_key: str,
+                                   param_keys: List[str], n_permute: int = 20) -> List[ParameterImportance]:
+    """Compute permutation-based importance for each parameter."""
+    target = np.array(corner_data[target_key])
+    baseline_var = np.var(target)
+
+    importances = []
+    for param in param_keys:
+        param_vals = np.array(corner_data[param])
+
+        # Correlation-based importance
+        if np.std(param_vals) > 1e-10 and np.std(target) > 1e-10:
+            corr = np.corrcoef(param_vals, target)[0, 1]
+        else:
+            corr = 0.0
+
+        # Permutation importance: how much variance is explained
+        importance = abs(corr) ** 2 * baseline_var  # R² * baseline variance
+
+        importances.append(ParameterImportance(
+            param=param,
+            importance=float(importance),
+            direction=float(np.sign(corr)),
+            correlation=float(corr),
+        ))
+
+    # Sort by importance
+    importances.sort(key=lambda x: abs(x.importance), reverse=True)
+    return importances
 
 
 def run_identifiability_scan(base_cfg: SimulationConfig,
-                             n_samples: int = 500,
-                             perturbation_scale: float = 0.2,
+                             n_samples: int = 2000,
+                             perturbation_scale: float = 0.3,
                              stage1_tol: float = 0.5,
                              stage2_tol: float = 0.5,
                              fast_grid: int = 128,
                              fast_steps: int = 250) -> IdentifiabilityResult:
-    """Scan parameter space to assess identifiability.
+    """Enhanced identifiability scan with ALL relevant parameters.
 
-    Uses Latin hypercube-like sampling around the base parameters.
+    Scans the full parameter space including dm3_to_A and all coupling knobs.
     """
-    key_params = ["beta", "beta_loc", "gamma0", "tau_dm3_0", "dm3_to_A", "H_base"]
+    key_params = IDENTIFIABILITY_PARAMS
 
     # Get base values
-    base_values = {k: getattr(base_cfg, k) for k in key_params}
+    base_values = {}
+    for k in key_params:
+        if hasattr(base_cfg, k):
+            base_values[k] = getattr(base_cfg, k)
+        else:
+            base_values[k] = PARAM_RANGES.get(k, (0.1, 0.5))[0]
 
-    # Define exploration ranges (±perturbation_scale around base)
+    # Define exploration ranges
     ranges_explored = {}
     for k in key_params:
-        base_val = base_values[k]
+        base_val = base_values.get(k, 0.1)
         low, high = PARAM_RANGES.get(k, (base_val * 0.5, base_val * 1.5))
         center = base_val
         half_width = (high - low) * perturbation_scale / 2
@@ -452,15 +461,280 @@ def run_identifiability_scan(base_cfg: SimulationConfig,
     n_stage1 = sum(corner_data["stage1_valid"])
     n_stage2 = sum(corner_data["stage2_valid"])
 
+    stage1_rate = n_stage1 / n_samples if n_samples > 0 else 0
+    stage2_rate = n_stage2 / n_samples if n_samples > 0 else 0
+
+    # Fine-tuning metric: log10 of acceptance rate
+    if stage2_rate > 0:
+        fine_tuning = np.log10(stage2_rate)
+    else:
+        fine_tuning = -np.inf  # Very fine-tuned
+
+    # Compute parameter importance for all samples
+    h0_late_importance = compute_permutation_importance(corner_data, "H0_late", key_params)
+    delta_h0_importance = compute_permutation_importance(corner_data, "Delta_H0", key_params)
+
+    # Stage-specific importance (on valid samples only)
+    stage1_indices = [i for i, v in enumerate(corner_data["stage1_valid"]) if v]
+    stage1_corner = {k: [corner_data[k][i] for i in stage1_indices] for k in list(corner_data.keys())}
+
+    if len(stage1_indices) > 10:
+        stage1_delta_importance = compute_permutation_importance(stage1_corner, "Delta_H0", key_params)
+    else:
+        stage1_delta_importance = []
+
+    stage2_indices = [i for i, v in enumerate(corner_data["stage2_valid"]) if v]
+    stage2_corner = {k: [corner_data[k][i] for i in stage2_indices] for k in list(corner_data.keys())}
+
+    if len(stage2_indices) > 10:
+        stage2_delta_importance = compute_permutation_importance(stage2_corner, "Delta_H0", key_params)
+    else:
+        stage2_delta_importance = []
+
     return IdentifiabilityResult(
         n_samples=n_samples,
         n_stage1_valid=n_stage1,
         n_stage2_valid=n_stage2,
         stage1_tolerance=stage1_tol,
         stage2_tolerance=stage2_tol,
+        stage1_acceptance_rate=stage1_rate,
+        stage2_acceptance_rate=stage2_rate,
+        stage2_fine_tuning_metric=float(fine_tuning) if np.isfinite(fine_tuning) else -10.0,
         param_ranges_explored=ranges_explored,
         valid_samples=valid_samples,
         corner_data=corner_data,
+        H0_late_importance=[asdict(x) for x in h0_late_importance[:10]],
+        Delta_H0_importance=[asdict(x) for x in delta_h0_importance[:10]],
+        stage1_Delta_H0_importance=[asdict(x) for x in stage1_delta_importance[:10]] if stage1_delta_importance else [],
+        stage2_Delta_H0_importance=[asdict(x) for x in stage2_delta_importance[:10]] if stage2_delta_importance else [],
+    )
+
+
+@dataclass
+class EnvironmentCurve:
+    """Binned relationship between H_local and environment."""
+    bin_centers: List[float]
+    H_local_mean: List[float]
+    H_local_std: List[float]
+    A_mean: List[float]
+    wlt2_mean: List[float]
+    n_per_bin: List[int]
+
+
+def compute_environment_dependence(cfg: SimulationConfig,
+                                   sim: SimulationResult,
+                                   n_bins: int = 10) -> Dict[str, EnvironmentCurve]:
+    """Compute binned relationships at final epoch."""
+    final = sim.final_fields
+    rho_tot = final["rho_b"] + cfg.g_dm * final["rho_dm3"]
+    A = final["A"]
+    wlt2 = final["wlt2"]
+    B = final["B"]
+
+    X_V_final = float(sim.history["X_V"][-1])
+    H_local = cfg.H_base * (1.0 + cfg.beta * X_V_final) * (1.0 + cfg.beta_loc * (1.0 - A))
+
+    curves = {}
+
+    # Density percentile curve
+    density_percentiles = np.percentile(rho_tot.flatten(), np.linspace(0, 100, n_bins + 1))
+    bin_centers_density = []
+    H_mean_density = []
+    H_std_density = []
+    A_mean_density = []
+    wlt2_mean_density = []
+    n_per_bin_density = []
+
+    for i in range(n_bins):
+        low, high = density_percentiles[i], density_percentiles[i + 1]
+        mask = (rho_tot >= low) & (rho_tot < high) if i < n_bins - 1 else (rho_tot >= low)
+        if mask.sum() > 0:
+            bin_centers_density.append(float((i + 0.5) * 10))
+            H_mean_density.append(float(np.mean(H_local[mask])))
+            H_std_density.append(float(np.std(H_local[mask])))
+            A_mean_density.append(float(np.mean(A[mask])))
+            wlt2_mean_density.append(float(np.mean(wlt2[mask])))
+            n_per_bin_density.append(int(mask.sum()))
+
+    curves["density"] = EnvironmentCurve(
+        bin_centers=bin_centers_density,
+        H_local_mean=H_mean_density,
+        H_local_std=H_std_density,
+        A_mean=A_mean_density,
+        wlt2_mean=wlt2_mean_density,
+        n_per_bin=n_per_bin_density,
+    )
+
+    # Binding percentile curve
+    B_percentiles = np.percentile(B.flatten(), np.linspace(0, 100, n_bins + 1))
+    bin_centers_B = []
+    H_mean_B = []
+    H_std_B = []
+    A_mean_B = []
+    wlt2_mean_B = []
+    n_per_bin_B = []
+
+    for i in range(n_bins):
+        low, high = B_percentiles[i], B_percentiles[i + 1]
+        mask = (B >= low) & (B < high) if i < n_bins - 1 else (B >= low)
+        if mask.sum() > 0:
+            bin_centers_B.append(float((i + 0.5) * 10))
+            H_mean_B.append(float(np.mean(H_local[mask])))
+            H_std_B.append(float(np.std(H_local[mask])))
+            A_mean_B.append(float(np.mean(A[mask])))
+            wlt2_mean_B.append(float(np.mean(wlt2[mask])))
+            n_per_bin_B.append(int(mask.sum()))
+
+    curves["binding"] = EnvironmentCurve(
+        bin_centers=bin_centers_B,
+        H_local_mean=H_mean_B,
+        H_local_std=H_std_B,
+        A_mean=A_mean_B,
+        wlt2_mean=wlt2_mean_B,
+        n_per_bin=n_per_bin_B,
+    )
+
+    # v3: K percentile curve
+    K = final.get("K")
+    if K is not None and K.max() > 1e-6:
+        K_percentiles = np.percentile(K.flatten(), np.linspace(0, 100, n_bins + 1))
+        bin_centers_K = []
+        H_mean_K = []
+        H_std_K = []
+        A_mean_K = []
+        wlt2_mean_K = []
+        n_per_bin_K = []
+
+        for i in range(n_bins):
+            low, high = K_percentiles[i], K_percentiles[i + 1]
+            mask = (K >= low) & (K < high) if i < n_bins - 1 else (K >= low)
+            if mask.sum() > 0:
+                bin_centers_K.append(float((i + 0.5) * 10))
+                H_mean_K.append(float(np.mean(H_local[mask])))
+                H_std_K.append(float(np.std(H_local[mask])))
+                A_mean_K.append(float(np.mean(A[mask])))
+                wlt2_mean_K.append(float(np.mean(wlt2[mask])))
+                n_per_bin_K.append(int(mask.sum()))
+
+        curves["K_percentile"] = EnvironmentCurve(
+            bin_centers=bin_centers_K,
+            H_local_mean=H_mean_K,
+            H_local_std=H_std_K,
+            A_mean=A_mean_K,
+            wlt2_mean=wlt2_mean_K,
+            n_per_bin=n_per_bin_K,
+        )
+
+    return {k: asdict(v) for k, v in curves.items()}
+
+
+@dataclass
+class MechanismFingerprint:
+    """Correlation statistics for mechanism fingerprinting."""
+    dm3_decay_A_increase_corr: float
+    dm3_pockets_H_hotspots_corr: float
+    dm3_decay_wlt2_corr: float
+    n_cells: int
+
+
+def compute_mechanism_fingerprints(cfg: SimulationConfig,
+                                   sim: SimulationResult) -> MechanismFingerprint:
+    """Compute correlations to verify mechanism predictions."""
+    t0_snap = sim.snapshots.get("t0", {})
+    final = sim.final_fields
+
+    dm3_initial = t0_snap.get("rho_dm3", np.ones_like(final["rho_dm3"]) * cfg.f_dm3_0)
+    dm3_final = final["rho_dm3"]
+    A_initial = t0_snap.get("A", np.ones_like(final["A"]) * cfg.A0)
+    A_final = final["A"]
+    wlt2_final = final["wlt2"]
+
+    dm3_decay = (dm3_initial - dm3_final).flatten()
+    A_increase = (A_final - A_initial).flatten()
+    dm3_pockets = dm3_initial.flatten()
+
+    X_V_final = float(sim.history["X_V"][-1])
+    H_local = cfg.H_base * (1.0 + cfg.beta * X_V_final) * (1.0 + cfg.beta_loc * (1.0 - A_final))
+    H_hotspots = H_local.flatten()
+
+    def safe_corr(x, y):
+        if np.std(x) < 1e-10 or np.std(y) < 1e-10:
+            return 0.0
+        return float(np.corrcoef(x, y)[0, 1])
+
+    return MechanismFingerprint(
+        dm3_decay_A_increase_corr=safe_corr(dm3_decay, A_increase),
+        dm3_pockets_H_hotspots_corr=safe_corr(dm3_pockets, H_hotspots),
+        dm3_decay_wlt2_corr=safe_corr(dm3_decay, wlt2_final.flatten()),
+        n_cells=int(dm3_decay.size),
+    )
+
+
+@dataclass
+class AmplifierKillTest:
+    """Results from amplifier kill tests."""
+    amplifier_mode: str
+    baseline_Delta_H0_mean: float
+    baseline_Delta_H0_std: float
+    amplified_Delta_H0_mean: float
+    amplified_Delta_H0_std: float
+    Delta_H0_increase: float
+    Delta_H0_increase_pct: float
+    robust_across_seeds: bool
+    converged_across_resolution: bool
+    stage2_acceptance_baseline: float
+    stage2_acceptance_amplified: float
+    pathological_fine_tuning: bool  # True if Stage-2 acceptance << 1e-3
+
+
+def run_amplifier_kill_test(base_cfg: SimulationConfig,
+                            n_seeds: int = 20,
+                            n_ident_samples: int = 500) -> AmplifierKillTest:
+    """Test whether the threshold amplifier helps without pathological fine-tuning."""
+    # Baseline (amplifier OFF)
+    cfg_off = SimulationConfig.from_dict(base_cfg.to_dict())
+    cfg_off.amplifier_mode = "none"
+
+    baseline_summary = run_multiseed(cfg_off, n_seeds=n_seeds, include_multireadout=False)
+
+    # Amplified (amplifier ON)
+    cfg_on = SimulationConfig.from_dict(base_cfg.to_dict())
+    cfg_on.amplifier_mode = "threshold"
+
+    amplified_summary = run_multiseed(cfg_on, n_seeds=n_seeds, include_multireadout=False)
+
+    # Check convergence with amplifier
+    conv_on = run_convergence(cfg_on, resolutions=[(128, 250), (256, 400)])
+
+    # Check identifiability with amplifier
+    ident_on = run_identifiability_scan(cfg_on, n_samples=n_ident_samples, fast_grid=64, fast_steps=100)
+    ident_off = run_identifiability_scan(cfg_off, n_samples=n_ident_samples, fast_grid=64, fast_steps=100)
+
+    delta_increase = amplified_summary.Delta_H0_mean - baseline_summary.Delta_H0_mean
+    if baseline_summary.Delta_H0_mean > 0:
+        delta_increase_pct = 100 * delta_increase / baseline_summary.Delta_H0_mean
+    else:
+        delta_increase_pct = 0.0
+
+    # Robustness: std should be similar or smaller
+    robust = amplified_summary.Delta_H0_std <= baseline_summary.Delta_H0_std * 1.5
+
+    # Pathological fine-tuning check
+    pathological = ident_on.stage2_acceptance_rate < 0.001
+
+    return AmplifierKillTest(
+        amplifier_mode="threshold",
+        baseline_Delta_H0_mean=baseline_summary.Delta_H0_mean,
+        baseline_Delta_H0_std=baseline_summary.Delta_H0_std,
+        amplified_Delta_H0_mean=amplified_summary.Delta_H0_mean,
+        amplified_Delta_H0_std=amplified_summary.Delta_H0_std,
+        Delta_H0_increase=delta_increase,
+        Delta_H0_increase_pct=delta_increase_pct,
+        robust_across_seeds=robust,
+        converged_across_resolution=conv_on.converged,
+        stage2_acceptance_baseline=ident_off.stage2_acceptance_rate,
+        stage2_acceptance_amplified=ident_on.stage2_acceptance_rate,
+        pathological_fine_tuning=pathological,
     )
 
 
@@ -481,7 +755,6 @@ def aggregate_environment_curves_multiseed(cfg: SimulationConfig,
         all_density_H.append(curves["density"]["H_local_mean"])
         all_binding_H.append(curves["binding"]["H_local_mean"])
 
-    # Aggregate
     density_H = np.array(all_density_H)
     binding_H = np.array(all_binding_H)
 
@@ -491,7 +764,7 @@ def aggregate_environment_curves_multiseed(cfg: SimulationConfig,
         "binding_H_mean": np.mean(binding_H, axis=0).tolist(),
         "binding_H_std": np.std(binding_H, axis=0).tolist(),
         "n_seeds": n_seeds,
-        "bin_centers": list(range(5, 100, 10)),  # 5, 15, 25, ... percentiles
+        "bin_centers": list(range(5, 100, 10)),
     }
 
 
@@ -522,4 +795,24 @@ def aggregate_fingerprints_multiseed(cfg: SimulationConfig,
         "dm3_decay_wlt2_corr_mean": float(np.mean(corrs_dm3_wlt2)),
         "dm3_decay_wlt2_corr_std": float(np.std(corrs_dm3_wlt2)),
         "n_seeds": n_seeds,
+    }
+
+
+def run_multireadout_comparison(cfg: SimulationConfig, n_seeds: int = 30) -> Dict:
+    """Compare ΔH0 under different readout definitions."""
+    summary = run_multiseed(cfg, n_seeds=n_seeds, include_multireadout=True)
+
+    return {
+        "n_seeds": n_seeds,
+        "volume": {
+            "Delta_H0_mean": summary.Delta_H0_volume_mean,
+            "Delta_H0_std": summary.Delta_H0_volume_std,
+        },
+        "tracer": {
+            "Delta_H0_mean": summary.Delta_H0_tracer_mean,
+            "Delta_H0_std": summary.Delta_H0_tracer_std,
+        },
+        "difference": {
+            "tracer_minus_volume_mean": summary.Delta_H0_tracer_mean - summary.Delta_H0_volume_mean,
+        }
     }

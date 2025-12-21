@@ -47,6 +47,43 @@ class SimulationConfig:
     early_window: Tuple[float, float] = (0.05, 0.18)
     late_window: Tuple[float, float] = (0.82, 1.0)
 
+    # Late-time readout mode: "volume" (baseline), "tracer" (halo-like weighting)
+    late_readout_mode: str = "volume"
+    # Tracer weighting parameters (for tracer mode)
+    tracer_B_threshold: float = 0.5  # Binding threshold for tracer formation
+    tracer_rho_power: float = 1.5    # Density weighting power for tracers
+
+    # Amplifier settings (OFF by default)
+    amplifier_mode: str = "none"  # "none", "threshold"
+    # Threshold amplifier: sharp peel-off turn-on below binding percentile
+    amp_B_percentile: float = 30.0   # Binding percentile below which peel-off amplifies
+    amp_gamma_boost: float = 2.0     # Multiplicative boost to gamma0 in low-B regions
+
+    # === M3 Container Constraint Field K (v3) ===
+    # K ∈ [0,1] represents M3 constraint region that holds M2 alignment
+    # and suppresses peel-off until container decays
+    K_enabled: bool = True  # Master switch for K field
+
+    # K initialization: K = clip(K_floor + (K_ceiling - K_floor)*S0, 0, 1)
+    # where S0 = sigmoid((log(rho_mem0) - log(rho_c)) / s_rho) reuses existing params
+    K_floor: float = 0.05      # Minimum K in low-density regions (FIXED, not scanned)
+    K_ceiling: float = 0.95    # Maximum K in high-density regions (FIXED, not scanned)
+
+    # K decay dynamics: tau_K_eff = tau_K0 * (1 + chi_K * B)
+    # K(t+dt) = K(t) * exp(-dt / tau_K_eff)
+    tau_K0: float = 0.30       # Base K decay timescale (SCANNED)
+    chi_K: float = 1.5         # Binding-dependent slowdown of K decay (SCANNED)
+
+    # K maintenance term (FIXED, not scanned) - optional stabilization
+    kK_maint: float = 0.0      # Maintenance rate (0 = disabled)
+    K_target: float = 1.0      # Target K for maintenance term
+
+    # K coupling to peel-off: Gamma_new = Gamma * (1 - K)^pK
+    pK: float = 2.0            # Peel-off suppression power (FIXED, not scanned)
+
+    # dm3_to_A coupling mode: "legacy" uses direct dm3→A, "K_mediated" disables it
+    dm3_to_A_mode: str = "K_mediated"  # "legacy" or "K_mediated"
+
     @property
     def dt_internal(self) -> float:
         return 1.0 / self.steps if self.dt is None else self.dt
@@ -102,6 +139,9 @@ PARAM_RANGES: Dict[str, Tuple[float, float]] = {
     "beta_dm": (0.0, 0.08),
     "q_obs": (0.8, 1.8),
     "b_B": (0.0, 0.8),
+    # K field parameters (v3) - only tau_K0 and chi_K are scanned
+    "tau_K0": (0.05, 2.0),   # Base K decay timescale
+    "chi_K": (0.0, 5.0),     # Binding-dependent slowdown
 }
 
 

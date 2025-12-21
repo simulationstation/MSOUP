@@ -96,7 +96,7 @@ def parse_report(report_path: Path) -> Tuple[Dict, List[LensData]]:
             continue
         lens_id, band, score_bin, mode = header_match.groups()
         metrics_part = line.split(":", 1)[1]
-        metrics = dict(re.findall(r'([A-Za-z_]+)=([-\\d\\.nan]+)', metrics_part))
+        metrics = dict(re.findall(r'([A-Za-z_]+)=([-\d.nan]+)', metrics_part))
         lenses.append(LensData(
             lens_id=lens_id,
             band=band,
@@ -831,6 +831,7 @@ def section_e_frequency_structure(lenses: List[LensData], data_root: Path, cache
     low_m_dominance = np.array(low_m_dominance)
     z_corr = np.array([l.z_corr for l in lenses])
     z_pow = np.array([l.z_pow for l in lenses])
+    z_corr_hp_full = np.array([l.z_corr_hp if l.z_corr_hp is not None else np.nan for l in lenses])
 
     valid = ~np.isnan(low_m_dominance)
     if np.sum(valid) > 3:
@@ -1033,7 +1034,7 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
 
         for bp in selected:
             masked_profile = mask_ring_profile(bp["profile"], common_mask)
-            stats = compute_field_stats(
+            field_stats = compute_field_stats(
                 masked_profile,
                 lag_max=cfg.lag_max,
                 hf_fraction=cfg.hf_fraction,
@@ -1051,12 +1052,12 @@ def section_f_band_consistency(lenses: List[LensData], data_root: Path, cache_di
                 valid_mask=common_mask,
             )
 
-            z_corr = (stats.t_corr - np.nanmean(nulls.t_corr)) / (np.nanstd(nulls.t_corr) + 1e-9)
-            z_pow = (stats.t_pow - np.nanmean(nulls.t_pow)) / (np.nanstd(nulls.t_pow) + 1e-9)
+            z_corr = (field_stats.t_corr - np.nanmean(nulls.t_corr)) / (np.nanstd(nulls.t_corr) + 1e-9)
+            z_pow = (field_stats.t_pow - np.nanmean(nulls.t_pow)) / (np.nanstd(nulls.t_pow) + 1e-9)
 
-            if nulls.t_corr_hp is not None and stats.t_corr_hp is not None:
-                z_corr_hp = (stats.t_corr_hp - np.nanmean(nulls.t_corr_hp)) / (np.nanstd(nulls.t_corr_hp) + 1e-9)
-                z_pow_hp = (stats.t_pow_hp - np.nanmean(nulls.t_pow_hp)) / (np.nanstd(nulls.t_pow_hp) + 1e-9)
+            if nulls.t_corr_hp is not None and field_stats.t_corr_hp is not None:
+                z_corr_hp = (field_stats.t_corr_hp - np.nanmean(nulls.t_corr_hp)) / (np.nanstd(nulls.t_corr_hp) + 1e-9)
+                z_pow_hp = (field_stats.t_pow_hp - np.nanmean(nulls.t_pow_hp)) / (np.nanstd(nulls.t_pow_hp) + 1e-9)
             else:
                 z_corr_hp = float('nan')
                 z_pow_hp = float('nan')
