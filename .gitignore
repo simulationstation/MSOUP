@@ -75,6 +75,15 @@ data/**/casa*
 data/**/CASA*
 data/**/__pycache__/
 
+# MSOUP purist closure data/results exclusions
+data/
+data_ignored/
+results/
+*.fits
+*.hdf5
+*.npz
+*.npy
+
 # Results cache
 results/**/cache/
 # Simulation and analysis outputs (generated locally, not versioned)
