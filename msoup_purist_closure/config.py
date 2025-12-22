@@ -26,6 +26,9 @@ class ProbeConfig:
     sigma_column: Optional[str] = "sigma"
     z_column: str = "z"
     label: Optional[str] = None
+    covariance_path: Optional[str] = None
+    obs_column: Optional[str] = None
+    observable_column: Optional[str] = None  # for BAO: which observable (DV/rd, etc.)
 
 
 @dataclass

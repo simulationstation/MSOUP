@@ -4,62 +4,36 @@ h_early: 67.0
 results_dir: results/msoup_purist_closure
 data_dir: data_ignored/probes
 probes:
-  - name: pantheon_lowz
-    label: "Pantheon+ SNe Ia (z<0.1, local)"
-    path: data_ignored/probes/pantheon_lowz.csv
-    kernel: K1
-    type: sn
-    is_local: true
-    z_column: z
-    sigma_column: sigma
-  - name: pantheon_midz
-    label: "Pantheon+ SNe Ia (0.1<=z<0.5)"
-    path: data_ignored/probes/pantheon_mid_0p1_0p5.csv
+  - name: pantheonplus
+    label: "Pantheon+ SNe Ia (full)"
+    path: data_ignored/probes/pantheonplus/pantheonplus_mu.csv
+    covariance_path: data_ignored/probes/pantheonplus/pantheonplus_cov_stat_sys.npz
     kernel: K1
     type: sn
     is_local: false
     z_column: z
-    sigma_column: sigma
-  - name: pantheon_highz
-    label: "Pantheon+ SNe Ia (z>=0.8)"
-    path: data_ignored/probes/pantheon_high_ge_0p8.csv
-    kernel: K1
-    type: sn
-    is_local: false
-    z_column: z
-    sigma_column: sigma
-  - name: pantheon_high_ge_0p7
-    label: "Pantheon+ SNe Ia (z>=0.7, robustness)"
-    path: data_ignored/probes/pantheon_high_ge_0p7.csv
-    kernel: K1
-    type: sn
-    is_local: false
-    z_column: z
-    sigma_column: sigma
-  - name: pantheon_high_ge_1p0
-    label: "Pantheon+ SNe Ia (z>=1.0, robustness)"
-    path: data_ignored/probes/pantheon_high_ge_1p0.csv
-    kernel: K1
-    type: sn
-    is_local: false
-    z_column: z
-    sigma_column: sigma
-  - name: sdss_bao
+    obs_column: mu_obs
+    sigma_column: mu_err_diag
+  - name: bao_dr16
     label: "SDSS eBOSS DR16 BAO"
-    path: data_ignored/probes/sdss_bao.csv
+    path: data_ignored/probes/bao_dr16/bao.csv
+    covariance_path: data_ignored/probes/bao_dr16/bao_cov.npz
     kernel: K2
     type: bao
     is_local: false
     z_column: z
+    obs_column: value
     sigma_column: sigma
+    observable_column: observable
   - name: tdcosmo
-    label: "TDCOSMO/H0LiCOW Time-Delay (z=z_lens)"
-    path: data_ignored/probes/tdcosmo_td.csv
+    label: "TDCOSMO/H0LiCOW Time-Delay"
+    path: data_ignored/probes/tdcosmo/td.csv
     kernel: K2
     type: td
     is_local: false
-    z_column: z
-    sigma_column: sigma
+    z_column: z_lens
+    obs_column: D_dt
+    sigma_column: sigma_D_dt
 fit:
   h_local: 73.0
   sigma_local: 1.0
