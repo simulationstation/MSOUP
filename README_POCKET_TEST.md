@@ -26,6 +26,7 @@ python -m msoup_pocket_test.run --config configs/pocket_default.yaml
 Flags:
 
 - `--fast` — fast sanity run (fewer nulls/block length) without dropping sensors or time.
+- `--unsafe` — opt out of WSL2 safety overrides (not recommended on 12 GB RAM).
 
 Outputs:
 
@@ -42,6 +43,13 @@ See `configs/pocket_default.yaml` for tunable parameters (paths, preprocessing, 
 - **Caching:** Parsed SP3 positions and clock batches are cached under `results/cache/`.
 - **Deterministic parallelism:** Random seeds are fixed; multiprocessing is used only in null generation.
 - **No silent subsampling:** All sensors/windows are kept; accelerations rely on block bootstrap/FFT-friendly detrending instead of dropping data.
+
+## Hardware safety (12 GB WSL2)
+
+- Default `resources` in `configs/pocket_default.yaml` target a 12 GB WSL2 host: `max_workers=1`, `max_rss_gb=9`, `pair_mode=binned`, `chunk_days=7`.
+- Sanity mode uses `resamples_sanity_default=128`; full mode uses `resamples_full_default=512`, both capped by the RSS guard.
+- WSL2 is auto-detected and forces the safe defaults unless `--unsafe` is passed.
+- If you hit a `RuntimeError` about RSS, lower `resources.resamples_full_default`, increase `chunk_days`, and keep `pair_mode=binned`.
 
 ## Tests
 

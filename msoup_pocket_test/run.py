@@ -34,6 +34,7 @@ from .nulls import NullType
 from .plots import generate_all_plots
 from .preprocess import drop_bad_windows, standardize_magnetometer
 from .report import compute_counts_coverage, generate_report, generate_robustness_report
+from .resources import ResourceMonitor, is_wsl
 from .stats import GlobalStats, compute_debiased_stats
 from .windows import Window, derive_windows, windows_to_frame
 
@@ -47,7 +48,7 @@ def _process_clk_batch(batch: pd.DataFrame, cadence_seconds: float) -> Dict[str,
     return group_by_sensor(df, "sensor")
 
 
-def load_all_data(cfg: PocketConfig) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, List[Path]]:
+def load_all_data(cfg: PocketConfig, monitor: ResourceMonitor | None = None) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, List[Path]]:
     """Load CLK, SP3, and magnetometer data. Returns per_sensor_series, positions, mag_paths."""
     cache_dir = Path(cfg.output.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,8 @@ def load_all_data(cfg: PocketConfig) -> Tuple[Dict[str, pd.DataFrame], pd.DataFr
     # Process CLK batches
     for batch in tqdm(clk_batches, desc="Processing CLK"):
         per_sensor_series.update(_process_clk_batch(batch, cfg.preprocess.cadence_seconds))
+        if monitor:
+            monitor.check("clk_batch")
 
     # Process magnetometer data
     for batch in tqdm(list(iter_magnetometer(mag_paths, cfg.data.chunk_hours)), desc="Processing MAG"):
@@ -85,6 +88,8 @@ def load_all_data(cfg: PocketConfig) -> Tuple[Dict[str, pd.DataFrame], pd.DataFr
                 per_sensor_series[station] = pd.concat([per_sensor_series[station], df[["time", "sensor", "value"]]])
             else:
                 per_sensor_series[station] = df[["time", "sensor", "value"]]
+        if monitor:
+            monitor.check("mag_batch")
 
     print(f"Loaded {len(per_sensor_series)} sensors total")
     return per_sensor_series, positions, mag_paths
@@ -96,6 +101,8 @@ def run_single_analysis(
     cfg: PocketConfig,
     label: str = "default",
     mode: str = "full",
+    monitor: ResourceMonitor | None = None,
+    unsafe: bool = False,
 ) -> Tuple[GlobalStats, GeometryResult, pd.DataFrame, pd.DataFrame, List[Window]]:
     """Run a single analysis pass with given config."""
     windows = derive_windows(per_sensor_series, cfg.preprocess, cfg.windows)
@@ -104,9 +111,12 @@ def run_single_analysis(
     candidates = extract_candidates(per_sensor_series, windows, cfg.candidates)
     candidate_frame = candidates_to_frame(candidates)
 
+    if monitor:
+        monitor.check("after_candidate_extraction")
+
     print(f"[{label}] Extracted {len(candidate_frame)} candidates from {len(windows)} windows")
 
-    stats = compute_debiased_stats(candidate_frame, window_frame, cfg.stats, cfg.candidates)
+    stats = compute_debiased_stats(candidate_frame, window_frame, cfg.stats, cfg.candidates, monitor=monitor, unsafe=unsafe)
 
     if cfg.geometry.enable_geometry_test and not positions.empty:
         geom = evaluate_geometry(candidate_frame, positions, cfg.geometry, run_mode=mode)
@@ -120,6 +130,8 @@ def run_robustness_sweeps(
     per_sensor_series: Dict[str, pd.DataFrame],
     positions: pd.DataFrame,
     base_cfg: PocketConfig,
+    monitor: ResourceMonitor | None = None,
+    unsafe: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run robustness sweeps across thresholds, masking, and null types."""
     results = []
@@ -157,7 +169,7 @@ def run_robustness_sweeps(
 
                 try:
                     stats, geom, cand_df, win_df, _ = run_single_analysis(
-                        per_sensor_series, positions, cfg, label, mode="robustness"
+                        per_sensor_series, positions, cfg, label, mode="robustness", monitor=monitor, unsafe=unsafe
                     )
 
                     results.append({
@@ -225,6 +237,7 @@ def generate_summary_json(
     geom: GeometryResult,
     counts_coverage: Dict[str, Any],
     run_mode: str,
+    resources: Optional[dict] = None,
     robustness_results: Optional[List[Dict]] = None,
 ) -> Path:
     """Generate summary.json with all key metrics."""
@@ -268,6 +281,7 @@ def generate_summary_json(
             "p_clustering": stats.p_clustering,
             "p_clustering_two_sided": stats.p_clustering_two_sided,
             "n_resamples": stats.n_resamples,
+            "pvalue_resolution": stats.pvalue_resolution,
         },
         "geometry": {
             "status": geom.status,
@@ -278,6 +292,9 @@ def generate_summary_json(
         },
         "counts_coverage": counts_coverage,
     }
+
+    if resources:
+        summary["resources"] = resources
 
     if robustness_results:
         summary["robustness"] = robustness_results
@@ -302,9 +319,32 @@ def main() -> None:
     parser.add_argument("--robustness-masks", type=str, help="Comma-separated mask variants name:coverage (e.g., strict:0.6,lenient:0.4)")
     parser.add_argument("--robustness-nulls", type=str, help="Comma-separated null variants (conditioned_resample,block_bootstrap,time_shift)")
     parser.add_argument("--robustness-resamples", type=int, help="Override number of null resamples for robustness sweeps")
+    parser.add_argument("--unsafe", action="store_true", help="Allow resource-heavy execution (disables WSL safety overrides)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cfg.data.chunk_hours = cfg.resources.chunk_days * 24
+    cfg.stats.n_processes = cfg.resources.max_workers
+    cfg.stats.pair_mode = cfg.resources.pair_mode
+    cfg.stats.time_bin_seconds = cfg.resources.time_bin_seconds
+    cfg.stats.max_candidates_in_memory = cfg.resources.max_candidates_in_memory
+
+    if args.mode == "sanity":
+        cfg.stats.null_realizations = cfg.resources.resamples_sanity_default
+    else:
+        cfg.stats.null_realizations = cfg.resources.resamples_full_default
+
+    if is_wsl() and not args.unsafe:
+        print("Detected WSL2 — applying safe defaults (max_workers=1, binned pairs, bounded resamples)")
+        cfg.resources.max_workers = 1
+        cfg.stats.n_processes = 1
+        cfg.stats.pair_mode = "binned"
+        cfg.stats.null_realizations = cfg.resources.resamples_sanity_default if args.mode == "sanity" else min(
+            cfg.resources.resamples_full_default, cfg.stats.null_realizations
+        )
+    elif is_wsl() and cfg.resources.max_workers > 1:
+        print("⚠️  WSL2 detected: max_workers>1 may increase memory pressure.")
+
     if args.robustness_thresholds:
         cfg.robustness.thresholds = [float(x) for x in args.robustness_thresholds.split(",") if x]
     if args.robustness_masks:
@@ -331,18 +371,20 @@ def main() -> None:
     elif args.mode == "robustness":
         print("=== ROBUSTNESS MODE: Full + sweeps ===")
 
+    monitor = ResourceMonitor(cfg.resources.max_rss_gb)
+
     # Create output directory
     output_dir = create_output_dir(cfg.output.results_dir)
     print(f"Output directory: {output_dir}")
 
     # Load all data
     print("\n=== Loading data ===")
-    per_sensor_series, positions, mag_paths = load_all_data(cfg)
+    per_sensor_series, positions, mag_paths = load_all_data(cfg, monitor)
 
     # Run main analysis
     print("\n=== Running main analysis ===")
     stats, geom, candidate_frame, window_frame, windows = run_single_analysis(
-        per_sensor_series, positions, cfg, "main", mode=args.mode
+        per_sensor_series, positions, cfg, "main", mode=args.mode, monitor=monitor, unsafe=args.unsafe
     )
 
     thresholds_for_counts = cfg.candidates.robustness_thresholds or sorted({
@@ -364,7 +406,7 @@ def main() -> None:
     robustness_results = None
     if args.mode == "robustness":
         print("\n=== Running robustness sweeps ===")
-        robustness_results = run_robustness_sweeps(per_sensor_series, positions, cfg)
+        robustness_results = run_robustness_sweeps(per_sensor_series, positions, cfg, monitor=monitor, unsafe=args.unsafe)
 
         # Generate robustness report
         robustness_path = generate_robustness_report(output_dir, robustness_results)
@@ -381,6 +423,16 @@ def main() -> None:
         cfg=cfg,
     )
 
+    resource_snapshot = {
+        "peak_rss_gb": stats.peak_rss_gb,
+        "max_workers": cfg.resources.max_workers,
+        "chunk_days": cfg.resources.chunk_days,
+        "pair_mode": cfg.stats.pair_mode,
+        "time_bin_seconds": cfg.stats.time_bin_seconds,
+        "n_resamples": stats.n_resamples,
+        "max_rss_gb": cfg.resources.max_rss_gb,
+    }
+
     # Generate main report
     print("\n=== Generating reports ===")
     report_path = generate_report(
@@ -391,10 +443,11 @@ def main() -> None:
         run_label=cfg.run_label,
         config_path=Path(args.config),
         counts_coverage=counts_coverage,
+        resources=resource_snapshot,
     )
 
     # Generate summary JSON
-    summary_path = generate_summary_json(output_dir, stats, geom, counts_coverage, args.mode, robustness_results)
+    summary_path = generate_summary_json(output_dir, stats, geom, counts_coverage, args.mode, resource_snapshot, robustness_results)
 
     print(f"\n=== Results ===")
     print(f"Report: {report_path}")
