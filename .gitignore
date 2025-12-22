@@ -43,6 +43,19 @@ htmlcov/
 # Data cache (can be re-downloaded)
 data/sparc_cache/
 
+# IGS GNSS precise orbit and clock products (large binary data)
+data/igs/
+data/gfz/
+
+# INTERMAGNET magnetometer data
+data/mag/
+
+# Download cache and temp files
+data/download_cache/
+data/*.tmp
+data/*.log
+data/checksums.json
+
 # Large datasets (clone separately)
 data/jwst_cowls/repo/
 data/jwst_cowls/*.json
