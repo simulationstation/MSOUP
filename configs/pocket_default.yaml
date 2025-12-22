@@ -1,0 +1,50 @@
+run_label: pocket_default
+fast_mode: false
+
+data:
+  clk_glob: "data/igs/clk/*.clk"
+  sp3_glob: "data/igs/sp3/*.sp3"
+  magnetometer_glob: "data/magnetometer/*.csv"
+  chunk_hours: 6
+  cache_dir: "results/cache"
+
+preprocess:
+  detrend: "median"
+  detrend_window_minutes: 60
+  highpass_minutes: 5
+  max_gap_factor: 5
+  min_window_minutes: 15
+  cadence_seconds: 30
+
+candidates:
+  threshold_sigma: 4.0
+  subthreshold_sigma: 2.0
+  min_duration_seconds: 30
+  neighbor_time_seconds: 120
+  neighbor_angle_degrees: 25
+  keep_subthreshold: true
+  max_candidates_per_sensor: 200000
+
+windows:
+  cadence_tolerance: 1.5
+  angular_response: true
+  require_fractional_coverage: 0.6
+
+stats:
+  null_realizations: 256
+  block_length: 128
+  random_seed: 13
+  n_processes: 4
+  enforce_determinism: true
+  allow_time_shift_null: false
+
+geometry:
+  enable_geometry_test: true
+  n_shuffles: 200
+  min_sensors: 4
+  speed_prior_kmps: 300.0
+
+output:
+  results_dir: "results/msoup_pocket_test"
+  report_name: "REPORT.md"
+  cache_dir: "results/cache"
