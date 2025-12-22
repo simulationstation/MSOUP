@@ -43,3 +43,15 @@ distance:
   z_max: 2.5
   num_z_samples: 256
   nuisance_M: 0.0
+
+f0:
+  delta_m_min: 0.0
+  delta_m_max: 2.0
+  num_points: 400
+  include_sn: true
+  include_bao: true
+  include_td: true
+  fb_reference: data_ignored/probes/fb_reference.csv
+  output_subdir: msoup_f0_inference
+  max_rss_mb: 6000
+  dominance_threshold: 0.5
