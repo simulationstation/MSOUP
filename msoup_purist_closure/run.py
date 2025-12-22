@@ -34,7 +34,7 @@ from .residuals import (
     compute_sn_residuals,
     compute_td_residuals,
 )
-from .td_inference import run_td_inference
+from .td_inference import run_td_inference, run_td_inference_v2
 
 
 # Memory guard threshold (MB)
@@ -59,7 +59,7 @@ def check_memory_guard() -> bool:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Purist MSOUP closure runner")
     parser.add_argument("--config", required=False, help="Path to YAML config")
-    parser.add_argument("--mode", choices=["kernel", "distance", "both", "infer-f0", "td_only"], default="kernel")
+    parser.add_argument("--mode", choices=["kernel", "distance", "both", "infer-f0", "td_only", "td_v2"], default="kernel")
     parser.add_argument("--bao-sanity", action="store_true",
                         help="Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK")
     parser.add_argument("--bao-benchmark", action="store_true",
@@ -470,6 +470,8 @@ def main(argv=None):
     cfg = load_config(args.config)
     if args.mode == "infer-f0":
         output_dir = cfg.results_dir.parent / cfg.f0.output_subdir / cfg.timestamp
+    elif args.mode == "td_v2":
+        output_dir = pathlib.Path("results/msoup_td_only_v2") / cfg.timestamp
     else:
         output_dir = cfg.results_dir / cfg.timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +491,15 @@ def main(argv=None):
             raise RuntimeError("No TD probe configured for td_only mode.")
         td_results = run_td_inference(cfg, output_dir, td_probe, run_tdlmc=args.tdlmc)
         print(f"TD-only inference written to {output_dir}")
+        summary = td_results.get("summary", {})
+        print(f"delta_m mean={summary.get('mean')}, median={summary.get('median')}")
+        return 0
+    if args.mode == "td_v2":
+        td_probe = next((p for p in cfg.probes if p.type.lower() == "td"), None)
+        if td_probe is None:
+            raise RuntimeError("No TD probe configured for td_v2 mode.")
+        td_results = run_td_inference_v2(cfg, output_dir, td_probe, run_tdlmc=args.tdlmc)
+        print(f"TD-only robust inference written to {output_dir}")
         summary = td_results.get("summary", {})
         print(f"delta_m mean={summary.get('mean')}, median={summary.get('median')}")
         return 0

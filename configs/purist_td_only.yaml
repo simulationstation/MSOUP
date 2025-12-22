@@ -45,6 +45,16 @@ f0:
   max_rss_mb: 6000
   dominance_threshold: 0.5
 
+td:
+  use_full_posteriors: true
+  robust_likelihood: student_t
+  df: 6
+  outlier_eps: 0.05
+  outlier_scale: 6.0
+  systematics_floor_mpc: 0.0
+  systematics_floor_mode: global
+  posterior_bins: 240
+
 # TDLMC validation data (for bias checks, not cosmology)
 tdlmc:
   path: data_ignored/tdlmc/tdlmc_rung3.csv

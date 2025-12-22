@@ -3,10 +3,10 @@ import pathlib
 import numpy as np
 import pandas as pd
 
-from msoup_purist_closure.config import DistanceConfig, F0Config, FitConfig, MsoupConfig, ProbeConfig
+from msoup_purist_closure.config import DistanceConfig, F0Config, FitConfig, MsoupConfig, ProbeConfig, TDRobustConfig
 from msoup_purist_closure.data_utils import compute_ddt_prediction
 from msoup_purist_closure.distances import h_eff_ratio
-from msoup_purist_closure.td_inference import f0_from_delta_m, load_td_master, run_td_inference
+from msoup_purist_closure.td_inference import f0_from_delta_m, load_td_master, run_td_inference, run_td_inference_v2
 
 
 def _make_cfg(tmp_path: pathlib.Path, csv_path: pathlib.Path) -> tuple[MsoupConfig, ProbeConfig]:
@@ -27,6 +27,29 @@ def _make_cfg(tmp_path: pathlib.Path, csv_path: pathlib.Path) -> tuple[MsoupConf
         distance=DistanceConfig(),
         f0=f0_cfg,
         results_dir=tmp_path / "results",
+    )
+    return cfg, probe
+
+
+def _make_cfg_v2(tmp_path: pathlib.Path, csv_path: pathlib.Path, td: TDRobustConfig) -> tuple[MsoupConfig, ProbeConfig]:
+    probe = ProbeConfig(
+        name="td_test",
+        path=str(csv_path),
+        type="td",
+        z_column="z_lens",
+        sigma_column="sigma",
+        obs_column="value",
+        observable_column="observable_type",
+    )
+    fit_cfg = FitConfig(h_local=73.0, sigma_local=1.0, delta_m_bounds=(-1, 1), fit_sn_m=False)
+    f0_cfg = F0Config(delta_m_min=0.0, delta_m_max=0.6, num_points=81, include_sn=False, include_bao=False, include_td=True)
+    cfg = MsoupConfig(
+        probes=[probe],
+        fit=fit_cfg,
+        distance=DistanceConfig(),
+        f0=f0_cfg,
+        results_dir=tmp_path / "results",
+        td=td,
     )
     return cfg, probe
 
@@ -124,3 +147,83 @@ def test_f0_mapping_monotonic():
     assert f0_vals[0] == 0.0
     assert np.all(np.diff(f0_vals) >= 0)
     assert np.all(f0_vals <= 1.0)
+
+
+def test_td_v2_h0_posterior_conversion(tmp_path):
+    csv_path = tmp_path / "td_master.csv"
+    posterior_path = tmp_path / "posterior.csv"
+    rng = np.random.default_rng(1)
+    posterior_values = rng.normal(loc=70.0, scale=1.0, size=1000)
+    pd.DataFrame({"H0": posterior_values}).to_csv(posterior_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "lens_id": "h0lens",
+                "z_lens": 0.4,
+                "z_source": 1.9,
+                "observable_type": "H0",
+                "file_ref": posterior_path.name,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+
+    td_cfg = TDRobustConfig(use_full_posteriors=True, robust_likelihood="student_t")
+    cfg, probe = _make_cfg_v2(tmp_path, csv_path, td_cfg)
+    output_dir = tmp_path / "out"
+    result = run_td_inference_v2(cfg, output_dir, probe)
+    assert "summary" in result
+    assert (output_dir / "REPORT.md").exists()
+    assert (output_dir / "summary.json").exists()
+    assert (output_dir / "td_audit.csv").exists()
+
+
+def test_td_v2_robust_downweights_outlier(tmp_path):
+    csv_path = tmp_path / "td_gauss.csv"
+    delta_m_true = 0.1
+    cfg_base, _ = _make_cfg(tmp_path, csv_path)
+    good_pred = compute_ddt_prediction(0.5, 1.8, delta_m_true, cfg_base)
+    outlier_pred = compute_ddt_prediction(0.6, 2.1, delta_m_true, cfg_base) * 1.3
+    rows = [
+        {"lens_id": "good", "z_lens": 0.5, "z_source": 1.8, "observable_type": "D_dt", "value": good_pred, "sigma": 0.05 * good_pred},
+        {"lens_id": "outlier", "z_lens": 0.6, "z_source": 2.1, "observable_type": "D_dt", "value": outlier_pred, "sigma": 0.005 * outlier_pred},
+    ]
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    td_cfg = TDRobustConfig(
+        use_full_posteriors=False,
+        robust_likelihood="student_t",
+        df=4,
+        systematics_floor_mpc=0.02 * good_pred,
+    )
+    cfg, probe = _make_cfg_v2(tmp_path, csv_path, td_cfg)
+    output_dir = tmp_path / "out2"
+    result = run_td_inference_v2(cfg, output_dir, probe)
+    fractions = {row["lens_id"]: row["fraction"] for row in result["dominance"]}
+    assert fractions["outlier"] < 0.8
+    assert result["verdict"] in {"Robust", "Dominance risk"}
+
+
+def test_td_v2_loo_shift_and_outputs(tmp_path):
+    csv_path = tmp_path / "td_loocheck.csv"
+    cfg_base, _ = _make_cfg(tmp_path, csv_path)
+    delta_m_true = 0.15
+    preds = [
+        compute_ddt_prediction(0.3, 1.6, delta_m_true, cfg_base),
+        compute_ddt_prediction(0.7, 2.0, delta_m_true, cfg_base),
+    ]
+    pd.DataFrame(
+        [
+            {"lens_id": f"lens{i}", "z_lens": 0.3 + 0.4 * i, "z_source": 1.6 + 0.4 * i, "observable_type": "D_dt", "value": p, "sigma": 0.03 * p}
+            for i, p in enumerate(preds)
+        ]
+    ).to_csv(csv_path, index=False)
+
+    td_cfg = TDRobustConfig(use_full_posteriors=False, robust_likelihood="mixture", outlier_eps=0.1, outlier_scale=8.0)
+    cfg, probe = _make_cfg_v2(tmp_path, csv_path, td_cfg)
+    output_dir = tmp_path / "out3"
+    result = run_td_inference_v2(cfg, output_dir, probe)
+    assert len(result["loo"]) == 2
+    for entry in result["loo"]:
+        assert abs(entry["delta_m_shift"]) < 0.2
+        assert "pareto_k" in entry
+    assert (output_dir / "influence.png").exists()

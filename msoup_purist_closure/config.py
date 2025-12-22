@@ -36,6 +36,25 @@ class F0Config:
 
 
 @dataclass
+class TDRobustConfig:
+    """Configuration block for robust TD-only inference.
+
+    Defaults are tuned for determinism and WSL2 memory ceilings while allowing
+    downstream users to enable heavier likelihoods explicitly through the YAML
+    file.
+    """
+
+    use_full_posteriors: bool = False
+    robust_likelihood: str = "gaussian"  # options: gaussian, student_t, mixture
+    df: float = 6.0
+    outlier_eps: float = 0.05
+    outlier_scale: float = 5.0
+    systematics_floor_mpc: float = 0.0
+    systematics_floor_mode: str = "global"
+    posterior_bins: int = 240
+
+
+@dataclass
 class ProbeConfig:
     """Configuration for a single probe dataset."""
 
@@ -85,6 +104,7 @@ class MsoupConfig:
 
     probes: List[ProbeConfig]
     fit: FitConfig
+    td: TDRobustConfig = field(default_factory=TDRobustConfig)
     omega_m0: float = DEFAULT_OMEGA_M0
     omega_L0: float = DEFAULT_OMEGA_L0
     h_early: float = DEFAULT_H_EARLY
@@ -118,9 +138,11 @@ def load_config(path: str | pathlib.Path) -> MsoupConfig:
     distance_cfg = DistanceConfig(**cfg_dict.get("distance", {}))
     f0_cfg = F0Config(**cfg_dict.get("f0", {}))
     tdlmc_cfg = cfg_dict.get("tdlmc")
+    td_cfg = TDRobustConfig(**cfg_dict.get("td", {}))
     msoup_cfg = MsoupConfig(
         probes=probes,
         fit=fit_cfg,
+        td=td_cfg,
         omega_m0=cfg_dict.get("omega_m0", DEFAULT_OMEGA_M0),
         omega_L0=cfg_dict.get("omega_L0", DEFAULT_OMEGA_L0),
         h_early=cfg_dict.get("h_early", DEFAULT_H_EARLY),
