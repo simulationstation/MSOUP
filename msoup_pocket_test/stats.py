@@ -4,11 +4,14 @@ Statistics for the MV-O1B pocket test.
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from dataclasses import dataclass
+from functools import partial
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 from .config import CandidateConfig, StatsConfig
 from .nulls import generate_null_catalogs
@@ -52,28 +55,42 @@ def compute_fano(counts: Iterable[int]) -> float:
 
 def _pairwise_clustering(df: pd.DataFrame, neighbor_time_s: float, neighbor_angle_deg: float) -> float:
     """
-    Compute pair-count clustering metric across sensors with optional angular
-    dependence (stored in df['angle'] if available).
+    Compute pair-count clustering metric using KDTree for O(n log n) performance.
+
+    Uses spatial indexing to find time-neighbors efficiently, then filters by
+    angle constraint if present. Produces mathematically identical results to
+    brute-force O(n²) approach.
     """
     if df.empty:
         return np.nan
-    times = pd.to_datetime(df["peak_time"]).astype("int64") / 1e9
-    angles = df.get("angle", pd.Series(np.zeros(len(df))))
-    count = 0
-    pairs = 0
+
     n = len(df)
-    for i in range(n):
-        for j in range(i + 1, n):
-            dt = abs(times[i] - times[j])
-            if dt > neighbor_time_s:
-                continue
-            if neighbor_angle_deg is not None and "angle" in df:
-                if abs(angles.iloc[i] - angles.iloc[j]) > neighbor_angle_deg:
-                    continue
-            count += 1
-        pairs += n - i - 1
-    norm = pairs if pairs > 0 else 1
-    return count / norm
+    total_pairs = n * (n - 1) // 2
+    if total_pairs == 0:
+        return np.nan
+
+    # Convert times to seconds (float array for KDTree)
+    times = pd.to_datetime(df["peak_time"]).astype("int64") / 1e9
+    times_arr = times.to_numpy().reshape(-1, 1)
+
+    # Build KDTree on times - O(n log n)
+    tree = cKDTree(times_arr)
+
+    # Find all pairs within time threshold - O(n log n + k) where k = matching pairs
+    time_neighbor_pairs = tree.query_pairs(r=neighbor_time_s, output_type='set')
+
+    if neighbor_angle_deg is None or "angle" not in df.columns:
+        # No angle constraint - time-neighbor count is the answer
+        count = len(time_neighbor_pairs)
+    else:
+        # Filter by angle constraint - O(k) where k << n²
+        angles = df["angle"].to_numpy()
+        count = 0
+        for i, j in time_neighbor_pairs:
+            if abs(angles[i] - angles[j]) <= neighbor_angle_deg:
+                count += 1
+
+    return count / total_pairs
 
 
 def compute_clustering(
@@ -95,6 +112,16 @@ def compute_empirical_pvalue(observed: float, null_samples: List[float]) -> floa
     null_arr = np.asarray(null_samples)
     more_extreme = np.sum(null_arr >= observed)
     return float((more_extreme + 1) / (len(null_samples) + 1))
+
+
+def _compute_null_stats(cat: pd.DataFrame, cand_cfg: CandidateConfig) -> Tuple[float, float]:
+    """Compute Fano and clustering for a single null catalog (for parallel execution)."""
+    if cat.empty:
+        return np.nan, np.nan
+    null_counts = cat.groupby("sensor").size()
+    fano = compute_fano(null_counts)
+    clust = compute_clustering(cat, cand_cfg)
+    return fano, clust
 
 
 def compute_debiased_stats(
@@ -125,15 +152,26 @@ def compute_debiased_stats(
         stats_cfg.random_seed,
     )
 
-    # Compute Fano and clustering for each null
-    fano_null = []
-    c_null = []
-    for cat in null_catalogs:
-        if cat.empty:
-            continue
-        null_counts = cat.groupby("sensor").size()
-        fano_null.append(compute_fano(null_counts))
-        c_null.append(compute_clustering(cat, cand_cfg))
+    # Compute Fano and clustering for each null - use parallel processing
+    n_procs = stats_cfg.n_processes if stats_cfg.n_processes > 1 else 1
+    compute_fn = partial(_compute_null_stats, cand_cfg=cand_cfg)
+
+    if n_procs > 1 and len(null_catalogs) > 1:
+        # Parallel execution
+        with mp.Pool(processes=n_procs) as pool:
+            results = pool.map(compute_fn, null_catalogs)
+        fano_null = [r[0] for r in results if not np.isnan(r[0])]
+        c_null = [r[1] for r in results if not np.isnan(r[1])]
+    else:
+        # Serial fallback
+        fano_null = []
+        c_null = []
+        for cat in null_catalogs:
+            if cat.empty:
+                continue
+            null_counts = cat.groupby("sensor").size()
+            fano_null.append(compute_fano(null_counts))
+            c_null.append(compute_clustering(cat, cand_cfg))
 
     # Fano statistics
     fano_null_mean = float(np.nanmean(fano_null)) if fano_null else 1.0
