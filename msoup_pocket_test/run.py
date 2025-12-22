@@ -52,11 +52,15 @@ def load_all_data(cfg: PocketConfig) -> Tuple[Dict[str, pd.DataFrame], pd.DataFr
     cache_dir = Path(cfg.output.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    clk_paths = resolve_paths(cfg.data.clk_glob)
-    sp3_paths = resolve_paths(cfg.data.sp3_glob)
-    mag_paths = resolve_paths(cfg.data.magnetometer_glob)
+    clk_paths = resolve_paths(cfg.data.clk_glob, cfg.data.max_clk_files)
+    sp3_paths = resolve_paths(cfg.data.sp3_glob, cfg.data.max_clk_files)  # SP3 follows CLK limit
+    mag_paths = resolve_paths(cfg.data.magnetometer_glob, cfg.data.max_mag_files)
 
     print(f"Found {len(clk_paths)} CLK files, {len(sp3_paths)} SP3 files, {len(mag_paths)} MAG files")
+    if cfg.data.max_clk_files > 0:
+        print(f"  (limited to {cfg.data.max_clk_files} CLK/SP3 files for memory safety)")
+    if cfg.data.max_mag_files > 0:
+        print(f"  (limited to {cfg.data.max_mag_files} MAG files for memory safety)")
 
     if not clk_paths:
         raise RuntimeError(f"No CLK files found matching: {cfg.data.clk_glob}")

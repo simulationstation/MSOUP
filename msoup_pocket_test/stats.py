@@ -4,18 +4,15 @@ Statistics for the MV-O1B pocket test.
 
 from __future__ import annotations
 
-import multiprocessing as mp
 from dataclasses import dataclass
-from functools import partial
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
-from tqdm import tqdm
 
 from .config import CandidateConfig, StatsConfig
-from .nulls import generate_null_catalogs
+from .nulls import iter_null_catalogs
 
 
 @dataclass
@@ -125,13 +122,41 @@ def _compute_null_stats(cat: pd.DataFrame, cand_cfg: CandidateConfig) -> Tuple[f
     return fano, clust
 
 
+def _get_memory_usage_mb() -> float:
+    """Get current process memory usage in MB."""
+    try:
+        import psutil
+        process = psutil.Process()
+        return process.memory_info().rss / (1024 * 1024)
+    except ImportError:
+        return 0.0
+
+
+def _get_available_memory_mb() -> float:
+    """Get available system memory in MB."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 * 1024)
+    except ImportError:
+        return float('inf')
+
+
 def compute_debiased_stats(
     candidates: pd.DataFrame,
     windows: pd.DataFrame,
     stats_cfg: StatsConfig,
     cand_cfg: CandidateConfig,
+    memory_limit_mb: float = 0,
 ) -> GlobalStats:
-    """Compute C_excess and Fano with null debiasing."""
+    """
+    Compute C_excess and Fano with null debiasing.
+
+    Uses streaming to process one null catalog at a time, avoiding memory explosion.
+
+    Args:
+        memory_limit_mb: If > 0, abort if process memory exceeds this limit.
+                        Default 0 means no limit (but will warn at 80% system RAM).
+    """
     if candidates.empty:
         return GlobalStats(
             fano_obs=np.nan, fano_null_mean=1.0, fano_null_std=0.0, fano_z=0.0, p_fano=1.0,
@@ -143,41 +168,50 @@ def compute_debiased_stats(
     fano_obs = compute_fano(counts)
     c_obs = compute_clustering(candidates, cand_cfg)
 
-    # Generate null catalogs
-    null_catalogs = generate_null_catalogs(
+    # Stream null catalogs one at a time (memory efficient)
+    fano_null = []
+    c_null = []
+    n_processed = 0
+
+    # Get initial memory state for monitoring
+    initial_mem = _get_memory_usage_mb()
+    try:
+        import psutil
+        total_mem = psutil.virtual_memory().total / (1024 * 1024)
+        mem_warning_threshold = total_mem * 0.8
+    except ImportError:
+        mem_warning_threshold = float('inf')
+
+    null_iter = iter_null_catalogs(
         candidates,
         windows,
         stats_cfg.null_realizations,
         stats_cfg.block_length,
         stats_cfg.allow_time_shift_null,
         stats_cfg.random_seed,
+        show_progress=True,
     )
 
-    # Compute Fano and clustering for each null - use parallel processing
-    n_procs = stats_cfg.n_processes if stats_cfg.n_processes > 1 else 1
-    compute_fn = partial(_compute_null_stats, cand_cfg=cand_cfg)
+    for cat in null_iter:
+        if cat.empty:
+            continue
 
-    if n_procs > 1 and len(null_catalogs) > 1:
-        # Parallel execution with progress bar
-        with mp.Pool(processes=n_procs) as pool:
-            results = list(tqdm(
-                pool.imap(compute_fn, null_catalogs),
-                total=len(null_catalogs),
-                desc=f"Computing null stats ({n_procs} cores)",
-                leave=False
-            ))
-        fano_null = [r[0] for r in results if not np.isnan(r[0])]
-        c_null = [r[1] for r in results if not np.isnan(r[1])]
-    else:
-        # Serial fallback with progress
-        fano_null = []
-        c_null = []
-        for cat in tqdm(null_catalogs, desc="Computing null stats", leave=False):
-            if cat.empty:
-                continue
-            null_counts = cat.groupby("sensor").size()
-            fano_null.append(compute_fano(null_counts))
-            c_null.append(compute_clustering(cat, cand_cfg))
+        # Compute stats for this single catalog
+        null_counts = cat.groupby("sensor").size()
+        fano_null.append(compute_fano(null_counts))
+        c_null.append(compute_clustering(cat, cand_cfg))
+        n_processed += 1
+
+        # Memory monitoring (check every 10 iterations to reduce overhead)
+        if n_processed % 10 == 0:
+            current_mem = _get_memory_usage_mb()
+            if memory_limit_mb > 0 and current_mem > memory_limit_mb:
+                print(f"\n⚠️  Memory limit reached ({current_mem:.0f} MB > {memory_limit_mb:.0f} MB)")
+                print(f"    Stopping early after {n_processed} null realizations")
+                break
+            if current_mem > mem_warning_threshold:
+                print(f"\n⚠️  High memory usage: {current_mem:.0f} MB (80% of system RAM)")
+                print(f"    Consider reducing null_realizations or data size")
 
     # Fano statistics
     fano_null_mean = float(np.nanmean(fano_null)) if fano_null else 1.0
@@ -211,6 +245,6 @@ def compute_debiased_stats(
         c_excess_std=c_excess_std,
         c_z=c_z,
         p_clustering=p_clustering,
-        n_resamples=len(null_catalogs),
+        n_resamples=n_processed,
         sensor_weights=weights,
     )

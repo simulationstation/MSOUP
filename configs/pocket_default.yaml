@@ -7,6 +7,9 @@ data:
   magnetometer_glob: "data/mag/*/2022/*.csv"
   chunk_hours: 6
   cache_dir: "results/cache"
+  # Memory-safety limits (0 = no limit, recommended: 30-60 for 11GB RAM)
+  max_clk_files: 30
+  max_mag_files: 30
 
 preprocess:
   detrend: "median"
@@ -34,7 +37,7 @@ stats:
   null_realizations: 256
   block_length: 128
   random_seed: 13
-  n_processes: 4
+  n_processes: 1  # Serial processing to avoid memory duplication
   enforce_determinism: true
   allow_time_shift_null: false
 

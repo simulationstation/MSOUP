@@ -181,9 +181,18 @@ def iter_magnetometer_series(paths: Iterable[Path], chunk_hours: float) -> Gener
             current = window_end
 
 
-def resolve_paths(glob_pattern: str) -> List[Path]:
-    """Return sorted list of paths for a glob pattern."""
-    return sorted(Path().glob(glob_pattern))
+def resolve_paths(glob_pattern: str, max_files: int = 0) -> List[Path]:
+    """
+    Return sorted list of paths for a glob pattern.
+
+    Args:
+        glob_pattern: Glob pattern to match files
+        max_files: Maximum number of files to return (0 = no limit)
+    """
+    paths = sorted(Path().glob(glob_pattern))
+    if max_files > 0:
+        paths = paths[:max_files]
+    return paths
 
 
 def load_positions_from_cache(cache_dir: Path, sp3_paths: List[Path]) -> pd.DataFrame:

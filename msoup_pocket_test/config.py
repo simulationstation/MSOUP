@@ -25,6 +25,9 @@ class DataConfig:
     magnetometer_glob: str = "data/magnetometer/*.csv"
     chunk_hours: float = 6.0
     cache_dir: str = "results/cache"
+    # Memory-safety limits: 0 means no limit
+    max_clk_files: int = 0
+    max_mag_files: int = 0
 
 
 @dataclass

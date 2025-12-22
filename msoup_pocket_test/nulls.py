@@ -125,16 +125,34 @@ def generate_null_catalogs(
     seed: int,
     show_progress: bool = True,
 ) -> List[pd.DataFrame]:
-    """Generate null catalogs conditioned on windows."""
+    """Generate null catalogs conditioned on windows (legacy list version)."""
+    return list(iter_null_catalogs(
+        candidates, windows, n_realizations, block_length,
+        allow_time_shift, seed, show_progress
+    ))
+
+
+def iter_null_catalogs(
+    candidates: pd.DataFrame,
+    windows: pd.DataFrame,
+    n_realizations: int,
+    block_length: int,
+    allow_time_shift: bool,
+    seed: int,
+    show_progress: bool = True,
+):
+    """
+    Generate null catalogs as a memory-efficient generator.
+
+    Yields one catalog at a time instead of holding all in memory.
+    """
     rng = np.random.default_rng(seed)
     use_time_shift = allow_time_shift and can_time_shift(windows)
-    catalogs: List[pd.DataFrame] = []
     iterator = range(n_realizations)
     if show_progress:
         iterator = tqdm(iterator, desc="Generating nulls", leave=False)
     for i in iterator:
         if use_time_shift and i % 2 == 0:
-            catalogs.append(time_shift_resample(candidates, windows, rng))
+            yield time_shift_resample(candidates, windows, rng)
         else:
-            catalogs.append(window_conditioned_resample(candidates, windows, block_length, rng))
-    return catalogs
+            yield window_conditioned_resample(candidates, windows, block_length, rng)
