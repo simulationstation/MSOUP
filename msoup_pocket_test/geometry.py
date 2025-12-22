@@ -5,7 +5,7 @@ Propagation geometry consistency tests.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,8 @@ class GeometryResult:
     n_events: int
     speed_kmps: float = 0.0
     normal: np.ndarray = None
+    status: str = "NOT_RUN"
+    reason: Optional[str] = None
 
 
 def _fit_plane_times(positions: pd.DataFrame, times: pd.Series) -> Tuple[np.ndarray, float]:
@@ -64,6 +66,7 @@ def evaluate_geometry(
     candidate_frame: pd.DataFrame,
     positions: pd.DataFrame,
     cfg: GeometryConfig,
+    run_mode: str = "full",
 ) -> GeometryResult:
     """
     Evaluate propagation geometry by comparing fitted plane speed/normal against
@@ -74,8 +77,9 @@ def evaluate_geometry(
 
     if df.empty or n_unique < cfg.min_sensors:
         return GeometryResult(
-            chi2_obs=np.nan, null_chi2s=None, p_value=1.0, n_events=0,
-            speed_kmps=np.nan, normal=np.zeros(3)
+            chi2_obs=None, null_chi2s=None, p_value=None, n_events=0,
+            speed_kmps=None, normal=np.zeros(3), status="NOT_TESTABLE",
+            reason=f"insufficient sensors (n={n_unique} < {cfg.min_sensors})"
         )
 
     # Use first arrival per sensor
@@ -91,13 +95,29 @@ def evaluate_geometry(
 
     if len(first_hits) < cfg.min_sensors:
         return GeometryResult(
-            chi2_obs=np.nan, null_chi2s=None, p_value=1.0, n_events=len(first_hits),
-            speed_kmps=np.nan, normal=np.zeros(3)
+            chi2_obs=None, null_chi2s=None, p_value=None, n_events=len(first_hits),
+            speed_kmps=None, normal=np.zeros(3), status="NOT_TESTABLE",
+            reason=f"insufficient sensors (n={len(first_hits)} < {cfg.min_sensors})"
+        )
+
+    if len(first_hits) < cfg.min_events:
+        return GeometryResult(
+            chi2_obs=None, null_chi2s=None, p_value=None, n_events=len(first_hits),
+            speed_kmps=None, normal=np.zeros(3), status="NOT_TESTABLE",
+            reason=f"insufficient coincident events (n={len(first_hits)} < {cfg.min_events})"
         )
 
     # Fit plane wave to observed data
     normal, speed = _fit_plane_times(valid.reset_index(), first_hits["peak_time"])
     chi2_obs = _compute_chi2(valid.reset_index(), first_hits["peak_time"], normal, speed)
+    if np.isnan(chi2_obs):
+        reason = "nan encountered in observed chi2"
+        if run_mode == "full":
+            raise ValueError(reason)
+        return GeometryResult(
+            chi2_obs=None, null_chi2s=None, p_value=None, n_events=len(first_hits),
+            speed_kmps=None, normal=normal, status="NOT_TESTABLE", reason=reason
+        )
 
     # Generate null distribution by shuffling arrival times
     rng = np.random.default_rng(cfg.n_shuffles + cfg.min_sensors)
@@ -107,11 +127,27 @@ def evaluate_geometry(
         shuffled_times = shuffled_times.reset_index(drop=True)
         null_normal, null_speed = _fit_plane_times(valid.reset_index(), shuffled_times)
         null_chi2 = _compute_chi2(valid.reset_index(), shuffled_times, null_normal, null_speed)
+        if np.isnan(null_chi2):
+            reason = "nan encountered in null chi2"
+            if run_mode == "full":
+                raise ValueError(reason)
+            return GeometryResult(
+                chi2_obs=None, null_chi2s=None, p_value=None, n_events=len(first_hits),
+                speed_kmps=None, normal=normal, status="NOT_TESTABLE", reason=reason
+            )
         null_chi2s.append(null_chi2)
 
     null_chi2s = np.array(null_chi2s)
     # P-value: fraction of null chi2 values <= observed (lower chi2 = better fit)
     p_value = (np.sum(null_chi2s <= chi2_obs) + 1) / (len(null_chi2s) + 1)
+    if np.isnan(p_value):
+        reason = "nan encountered in p-value"
+        if run_mode == "full":
+            raise ValueError(reason)
+        return GeometryResult(
+            chi2_obs=None, null_chi2s=None, p_value=None, n_events=len(first_hits),
+            speed_kmps=None, normal=normal, status="NOT_TESTABLE", reason=reason
+        )
 
     return GeometryResult(
         chi2_obs=chi2_obs,
@@ -119,5 +155,7 @@ def evaluate_geometry(
         p_value=p_value,
         n_events=len(first_hits),
         speed_kmps=speed,
-        normal=normal
+        normal=normal,
+        status="COMPLETED",
+        reason=None,
     )

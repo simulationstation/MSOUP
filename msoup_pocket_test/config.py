@@ -15,6 +15,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from .nulls import NullType
+
 
 @dataclass
 class DataConfig:
@@ -53,6 +55,7 @@ class CandidateConfig:
     neighbor_angle_degrees: float = 25.0
     keep_subthreshold: bool = True
     max_candidates_per_sensor: int = 200000
+    robustness_thresholds: Optional[list] = None
 
 
 @dataclass
@@ -76,6 +79,8 @@ class StatsConfig:
     enforce_determinism: bool = True
     allow_time_shift_null: bool = False
     max_empirical_pvalue: float = 1.0
+    null_type: NullType = NullType.BLOCK_BOOTSTRAP
+    robustness_null_variants: Optional[list] = None
 
 
 @dataclass
@@ -86,6 +91,7 @@ class GeometryConfig:
     n_shuffles: int = 200
     min_sensors: int = 4
     speed_prior_kmps: float = 300.0
+    min_events: int = 20
 
 
 @dataclass
@@ -95,6 +101,16 @@ class OutputConfig:
     results_dir: str = "results/msoup_pocket_test"
     report_name: str = "REPORT.md"
     cache_dir: str = "results/cache"
+
+
+@dataclass
+class RobustnessConfig:
+    """Robustness sweep controls."""
+
+    thresholds: Optional[list] = None
+    mask_variants: Optional[list] = None
+    null_variants: Optional[list] = None
+    n_resamples: Optional[int] = None
 
 
 @dataclass
@@ -108,6 +124,7 @@ class PocketConfig:
     stats: StatsConfig = field(default_factory=StatsConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     run_label: str = "default"
     fast_mode: bool = False
 
@@ -123,7 +140,11 @@ class PocketConfig:
         """Construct config from nested dictionaries."""
         def build(subcls, key):
             if key in data:
-                return subcls(**data[key])
+                payload = data[key]
+                if subcls is StatsConfig and "null_type" in payload and isinstance(payload["null_type"], str):
+                    payload = dict(payload)
+                    payload["null_type"] = NullType(payload["null_type"])
+                return subcls(**payload)
             return subcls()
 
         return cls(
@@ -134,20 +155,25 @@ class PocketConfig:
             stats=build(StatsConfig, "stats"),
             geometry=build(GeometryConfig, "geometry"),
             output=build(OutputConfig, "output"),
+            robustness=build(RobustnessConfig, "robustness"),
             run_label=data.get("run_label", "default"),
             fast_mode=data.get("fast_mode", False),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dict suitable for YAML."""
+        stats_dict = vars(self.stats).copy()
+        if isinstance(stats_dict.get("null_type"), NullType):
+            stats_dict["null_type"] = stats_dict["null_type"].value
         return {
             "data": vars(self.data),
             "preprocess": vars(self.preprocess),
             "candidates": vars(self.candidates),
             "windows": vars(self.windows),
-            "stats": vars(self.stats),
+            "stats": stats_dict,
             "geometry": vars(self.geometry),
             "output": vars(self.output),
+            "robustness": vars(self.robustness),
             "run_label": self.run_label,
             "fast_mode": self.fast_mode,
         }
