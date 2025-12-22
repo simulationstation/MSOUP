@@ -15,6 +15,27 @@ DEFAULT_H_EARLY = 67.0
 
 
 @dataclass
+class F0Config:
+    """Configuration block for f0 inference.
+
+    The scan defaults are deliberately conservative to avoid runaway memory use
+    on WSL2 environments, while still allowing users to request denser grids
+    through the YAML file.
+    """
+
+    delta_m_min: float = 0.0
+    delta_m_max: float = 2.0
+    num_points: int = 400
+    include_sn: bool = True
+    include_bao: bool = True
+    include_td: bool = True
+    fb_reference: Optional[str] = None
+    output_subdir: str = "msoup_f0_inference"
+    max_rss_mb: int = 6000
+    dominance_threshold: float = 0.5
+
+
+@dataclass
 class ProbeConfig:
     """Configuration for a single probe dataset."""
 
@@ -66,6 +87,7 @@ class MsoupConfig:
     results_dir: pathlib.Path = pathlib.Path("results/msoup_purist_closure")
     data_dir: Optional[pathlib.Path] = None
     distance: DistanceConfig = field(default_factory=DistanceConfig)
+    f0: F0Config = field(default_factory=F0Config)
     timestamp: str = field(
         default_factory=lambda: _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     )
@@ -89,6 +111,7 @@ def load_config(path: str | pathlib.Path) -> MsoupConfig:
     probes = [ProbeConfig(**p) for p in cfg_dict["probes"]]
     fit_cfg = FitConfig(**cfg_dict["fit"])
     distance_cfg = DistanceConfig(**cfg_dict.get("distance", {}))
+    f0_cfg = F0Config(**cfg_dict.get("f0", {}))
     msoup_cfg = MsoupConfig(
         probes=probes,
         fit=fit_cfg,
@@ -98,5 +121,6 @@ def load_config(path: str | pathlib.Path) -> MsoupConfig:
         results_dir=pathlib.Path(cfg_dict.get("results_dir", "results/msoup_purist_closure")),
         data_dir=cfg_dict.get("data_dir"),
         distance=distance_cfg,
+        f0=f0_cfg,
     )
     return msoup_cfg.resolve_paths()

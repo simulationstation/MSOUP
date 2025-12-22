@@ -12,10 +12,12 @@ import pandas as pd
 
 from .bao_benchmark import run_bao_benchmark
 from .config import MsoupConfig, ProbeConfig, load_config
-from .distances import angular_diameter_distance, comoving_distance, h_eff_ratio, luminosity_distance
+from .data_utils import compute_ddt_prediction, load_bao_observed_data, load_sn_observed_data, load_td_observed_data
+from .distances import angular_diameter_distance, h_eff_ratio, luminosity_distance
 from .fit import fit_delta_m
+from .infer_f0 import run_inference
 from .kernels import kernel_weights, load_probe_csv
-from .observables import bao_dv, bao_dm, bao_dh, bao_predict, distance_modulus, lens_time_delay_scaling
+from .observables import bao_dv, bao_dm, bao_dh, bao_predict, distance_modulus
 from .bao_diagnostics import (
     run_bao_sanity_cases,
     write_bao_audit_csv,
@@ -31,7 +33,6 @@ from .residuals import (
     compute_bao_residuals,
     compute_sn_residuals,
     compute_td_residuals,
-    load_covariance,
 )
 
 
@@ -57,7 +58,7 @@ def check_memory_guard() -> bool:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Purist MSOUP closure runner")
     parser.add_argument("--config", required=False, help="Path to YAML config")
-    parser.add_argument("--mode", choices=["kernel", "distance", "both"], default="kernel")
+    parser.add_argument("--mode", choices=["kernel", "distance", "both", "infer-f0"], default="kernel")
     parser.add_argument("--bao-sanity", action="store_true",
                         help="Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK")
     parser.add_argument("--bao-benchmark", action="store_true",
@@ -93,184 +94,6 @@ def run_kernel_mode(cfg: MsoupConfig, output_dir: pathlib.Path) -> Dict[str, dic
     plot_hinf_curves(delta_m_grid, probe_results, output_dir, cfg.h_early)
     plot_kernel_histograms(kernels_hist, output_dir)
     return probe_results
-
-
-def load_sn_observed_data(probe: ProbeConfig) -> Tuple[Optional[pd.DataFrame], Optional[np.ndarray], str]:
-    """
-    Load SN observed data: z, mu_obs (or m_b), sigma, and optionally covariance.
-    Returns (DataFrame, Covariance or None, status_reason).
-    """
-    probe_path = pathlib.Path(probe.path)
-
-    # Try to find the data file
-    # Check if it points to pantheonplus_mu.csv or similar
-    if not probe_path.exists():
-        # Try to find in the probe's directory based on type
-        return None, None, f"file not found: {probe.path}"
-
-    try:
-        df = pd.read_csv(probe_path)
-    except Exception as e:
-        return None, None, f"CSV read error: {e}"
-
-    # Check for required columns
-    z_col = probe.z_column or 'z'
-    if z_col not in df.columns:
-        return None, None, f"missing column: {z_col}"
-
-    # Look for mu_obs or m_b
-    mu_col = None
-    for col in ['mu_obs', 'mu', 'm_b', 'mb', 'MU_SH0ES']:
-        if col in df.columns:
-            mu_col = col
-            break
-    if mu_col is None:
-        return None, None, "missing observed column: mu_obs/mu/m_b"
-
-    # Look for sigma column
-    sigma_col = probe.sigma_column or 'sigma'
-    if sigma_col not in df.columns:
-        for col in ['mu_err_diag', 'sigma', 'err', 'uncertainty']:
-            if col in df.columns:
-                sigma_col = col
-                break
-
-    if sigma_col not in df.columns:
-        return None, None, f"missing sigma column"
-
-    # Standardize columns
-    df = df.rename(columns={z_col: 'z', mu_col: 'mu_obs', sigma_col: 'sigma'})
-
-    # Load covariance if available
-    cov = None
-    cov_path = probe_path.parent / (probe_path.stem.replace('_mu', '_cov_stat_sys') + '.npz')
-    if cov_path.exists():
-        cov = load_covariance(cov_path, len(df))
-
-    return df, cov, "OK"
-
-
-def load_bao_observed_data(probe: ProbeConfig) -> Tuple[Optional[pd.DataFrame], str]:
-    """
-    Load BAO observed data: z, observable type, value, sigma.
-    Returns (DataFrame, status_reason).
-    """
-    probe_path = pathlib.Path(probe.path)
-    if not probe_path.exists():
-        return None, f"file not found: {probe.path}"
-
-    try:
-        df = pd.read_csv(probe_path)
-    except Exception as e:
-        return None, f"CSV read error: {e}"
-
-    # Check for required columns
-    required = ['z', 'value', 'sigma']
-    for col in required:
-        if col not in df.columns:
-            return None, f"missing column: {col}"
-
-    # Check for observable type column
-    if 'observable' not in df.columns:
-        return None, "missing column: observable"
-
-    return df, "OK"
-
-
-def load_td_observed_data(probe: ProbeConfig) -> Tuple[Optional[pd.DataFrame], str]:
-    """
-    Load time-delay observed data: z_lens, z_source, D_dt, sigma.
-    Returns (DataFrame, status_reason).
-    """
-    probe_path = pathlib.Path(probe.path)
-    if not probe_path.exists():
-        return None, f"file not found: {probe.path}"
-
-    try:
-        df = pd.read_csv(probe_path)
-    except Exception as e:
-        return None, f"CSV read error: {e}"
-
-    # Check for required columns
-    z_lens_col = None
-    for col in ['z_lens', 'z', 'zlens']:
-        if col in df.columns:
-            z_lens_col = col
-            break
-    if z_lens_col is None:
-        return None, "missing column: z_lens"
-
-    z_source_col = None
-    for col in ['z_source', 'zsource', 'zs']:
-        if col in df.columns:
-            z_source_col = col
-            break
-    if z_source_col is None:
-        return None, "missing column: z_source"
-
-    ddt_col = None
-    for col in ['D_dt', 'Ddt', 'D_dt_obs']:
-        if col in df.columns:
-            ddt_col = col
-            break
-    if ddt_col is None:
-        return None, "missing column: D_dt"
-
-    sigma_col = None
-    for col in ['sigma_D_dt', 'sigma', 'sigma_Ddt']:
-        if col in df.columns:
-            sigma_col = col
-            break
-    if sigma_col is None:
-        return None, "missing column: sigma_D_dt"
-
-    # Standardize columns
-    df = df.rename(columns={
-        z_lens_col: 'z_lens',
-        z_source_col: 'z_source',
-        ddt_col: 'D_dt',
-        sigma_col: 'sigma',
-    })
-
-    return df, "OK"
-
-
-def compute_ddt_prediction(z_lens: float, z_source: float, delta_m: float, cfg: MsoupConfig) -> float:
-    """
-    Compute predicted D_dt = (1+z_l) * D_l * D_ls / D_s (time-delay distance).
-    Uses angular diameter distances.
-    """
-    c_km_s = cfg.distance.speed_of_light
-
-    # Get angular diameter distances
-    d_l = angular_diameter_distance(
-        np.array([z_lens]), delta_m=delta_m,
-        h_early=cfg.h_early, omega_m0=cfg.omega_m0, omega_L0=cfg.omega_L0
-    )[0]
-
-    d_s = angular_diameter_distance(
-        np.array([z_source]), delta_m=delta_m,
-        h_early=cfg.h_early, omega_m0=cfg.omega_m0, omega_L0=cfg.omega_L0
-    )[0]
-
-    # D_ls requires special treatment for angular diameter distance between lens and source
-    # D_ls = D_s / (1 + z_s) - D_l / (1 + z_l) for flat universe
-    chi_l = comoving_distance(
-        np.array([z_lens]), delta_m=delta_m,
-        h_early=cfg.h_early, omega_m0=cfg.omega_m0, omega_L0=cfg.omega_L0
-    )[0]
-    chi_s = comoving_distance(
-        np.array([z_source]), delta_m=delta_m,
-        h_early=cfg.h_early, omega_m0=cfg.omega_m0, omega_L0=cfg.omega_L0
-    )[0]
-    d_ls = (chi_s - chi_l) / (1 + z_source)
-
-    # D_dt = (1 + z_l) * D_l * D_s / D_ls
-    # Units: distances are in Mpc (c/H0 units)
-    if d_ls <= 0:
-        return np.nan
-    ddt = (1 + z_lens) * d_l * d_s / d_ls
-    return ddt
 
 
 def compute_bao_dv_rd(z: float, delta_m: float, cfg: MsoupConfig, rd: float = 147.09) -> float:
@@ -643,12 +466,20 @@ def main(argv=None):
         return 0
 
     cfg = load_config(args.config)
-    output_dir = cfg.results_dir / cfg.timestamp
+    if args.mode == "infer-f0":
+        output_dir = cfg.results_dir.parent / cfg.f0.output_subdir / cfg.timestamp
+    else:
+        output_dir = cfg.results_dir / cfg.timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
     probe_results = None
     distance_results = None
     bao_sanity_results = None
+
+    if args.mode == "infer-f0":
+        inference_results = run_inference(cfg, output_dir)
+        print(f"f0 inference written to {output_dir}")
+        return 0
 
     if args.mode in {"kernel", "both"}:
         probe_results = run_kernel_mode(cfg, output_dir)
