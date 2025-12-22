@@ -10,4 +10,5 @@ __all__ = [
     "report",
     "plots",
     "run",
+    "td_inference",
 ]

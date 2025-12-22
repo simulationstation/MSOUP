@@ -50,6 +50,10 @@ class ProbeConfig:
     covariance_path: Optional[str] = None
     obs_column: Optional[str] = None
     observable_column: Optional[str] = None  # for BAO: which observable (DV/rd, etc.)
+    filter_column: Optional[str] = None
+    filter_value: Optional[str] = None
+    file_ref_column: Optional[str] = "file_ref"
+    sample_column: Optional[str] = None
 
 
 @dataclass
@@ -91,6 +95,7 @@ class MsoupConfig:
     timestamp: str = field(
         default_factory=lambda: _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     )
+    tdlmc: Optional[dict] = None
 
     def resolve_paths(self) -> "MsoupConfig":
         """Resolve probe paths relative to config location."""
@@ -112,6 +117,7 @@ def load_config(path: str | pathlib.Path) -> MsoupConfig:
     fit_cfg = FitConfig(**cfg_dict["fit"])
     distance_cfg = DistanceConfig(**cfg_dict.get("distance", {}))
     f0_cfg = F0Config(**cfg_dict.get("f0", {}))
+    tdlmc_cfg = cfg_dict.get("tdlmc")
     msoup_cfg = MsoupConfig(
         probes=probes,
         fit=fit_cfg,
@@ -122,5 +128,6 @@ def load_config(path: str | pathlib.Path) -> MsoupConfig:
         data_dir=cfg_dict.get("data_dir"),
         distance=distance_cfg,
         f0=f0_cfg,
+        tdlmc=tdlmc_cfg,
     )
     return msoup_cfg.resolve_paths()

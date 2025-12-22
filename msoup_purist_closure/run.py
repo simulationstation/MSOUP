@@ -34,6 +34,7 @@ from .residuals import (
     compute_sn_residuals,
     compute_td_residuals,
 )
+from .td_inference import run_td_inference
 
 
 # Memory guard threshold (MB)
@@ -58,11 +59,12 @@ def check_memory_guard() -> bool:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Purist MSOUP closure runner")
     parser.add_argument("--config", required=False, help="Path to YAML config")
-    parser.add_argument("--mode", choices=["kernel", "distance", "both", "infer-f0"], default="kernel")
+    parser.add_argument("--mode", choices=["kernel", "distance", "both", "infer-f0", "td_only"], default="kernel")
     parser.add_argument("--bao-sanity", action="store_true",
                         help="Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK")
     parser.add_argument("--bao-benchmark", action="store_true",
                         help="Run embedded BAO benchmark table without loading external data")
+    parser.add_argument("--tdlmc", action="store_true", help="Run optional TDLMC bias calibration for TD-only mode")
     args = parser.parse_args(argv)
     if not args.bao_benchmark and args.config is None:
         parser.error("--config is required unless --bao-benchmark is specified")
@@ -479,6 +481,16 @@ def main(argv=None):
     if args.mode == "infer-f0":
         inference_results = run_inference(cfg, output_dir)
         print(f"f0 inference written to {output_dir}")
+        return 0
+
+    if args.mode == "td_only":
+        td_probe = next((p for p in cfg.probes if p.type.lower() == "td"), None)
+        if td_probe is None:
+            raise RuntimeError("No TD probe configured for td_only mode.")
+        td_results = run_td_inference(cfg, output_dir, td_probe, run_tdlmc=args.tdlmc)
+        print(f"TD-only inference written to {output_dir}")
+        summary = td_results.get("summary", {})
+        print(f"delta_m mean={summary.get('mean')}, median={summary.get('median')}")
         return 0
 
     if args.mode in {"kernel", "both"}:
