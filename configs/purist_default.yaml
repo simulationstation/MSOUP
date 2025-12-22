@@ -1,0 +1,28 @@
+omega_m0: 0.315
+omega_L0: 0.685
+h_early: 67.0
+results_dir: results/msoup_purist_closure
+data_dir: data
+probes:
+  - name: local_sn
+    path: data/local_sn.csv
+    kernel: K1
+    type: sn
+    is_local: true
+    z_column: z
+    sigma_column: sigma
+  - name: mid_bao
+    path: data/mid_bao.csv
+    kernel: K2
+    type: bao
+    z_column: z
+    sigma_column: sigma
+fit:
+  h_local: 73.0
+  sigma_local: 1.0
+  delta_m_bounds: [-6, 6]
+  fit_sn_m: false
+distance:
+  z_max: 2.0
+  num_z_samples: 256
+  nuisance_M: 0.0
