@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,12 +29,13 @@ from .io_igs import (
     resolve_paths,
 )
 from .io_mag import group_by_station, iter_magnetometer
+from .guardrails import assert_finite_metrics
 from .nulls import NullType
 from .plots import generate_all_plots
 from .preprocess import drop_bad_windows, standardize_magnetometer
-from .report import generate_report, generate_robustness_report
+from .report import compute_counts_coverage, generate_report, generate_robustness_report
 from .stats import GlobalStats, compute_debiased_stats
-from .windows import derive_windows, windows_to_frame
+from .windows import Window, derive_windows, windows_to_frame
 
 
 def _process_clk_batch(batch: pd.DataFrame, cadence_seconds: float) -> Dict[str, pd.DataFrame]:
@@ -95,7 +95,8 @@ def run_single_analysis(
     positions: pd.DataFrame,
     cfg: PocketConfig,
     label: str = "default",
-) -> Tuple[GlobalStats, GeometryResult, pd.DataFrame, pd.DataFrame]:
+    mode: str = "full",
+) -> Tuple[GlobalStats, GeometryResult, pd.DataFrame, pd.DataFrame, List[Window]]:
     """Run a single analysis pass with given config."""
     windows = derive_windows(per_sensor_series, cfg.preprocess, cfg.windows)
     window_frame = windows_to_frame(windows)
@@ -108,11 +109,11 @@ def run_single_analysis(
     stats = compute_debiased_stats(candidate_frame, window_frame, cfg.stats, cfg.candidates)
 
     if cfg.geometry.enable_geometry_test and not positions.empty:
-        geom = evaluate_geometry(candidate_frame, positions, cfg.geometry)
+        geom = evaluate_geometry(candidate_frame, positions, cfg.geometry, run_mode=mode)
     else:
-        geom = GeometryResult(float("nan"), None, 1.0, 0)
+        geom = GeometryResult(chi2_obs=None, null_chi2s=None, p_value=None, n_events=0, speed_kmps=None, normal=np.zeros(3), status="NOT_TESTABLE", reason="geometry disabled or positions unavailable")
 
-    return stats, geom, candidate_frame, window_frame
+    return stats, geom, candidate_frame, window_frame, windows
 
 
 def run_robustness_sweeps(
@@ -123,18 +124,14 @@ def run_robustness_sweeps(
     """Run robustness sweeps across thresholds, masking, and null types."""
     results = []
 
-    # Threshold sweep: 3 values
-    thresholds = [3.0, 4.0, 5.0]
+    thresholds = base_cfg.robustness.thresholds or [3.0, 4.0, 5.0]
 
-    # Masking variants: 2
-    masking_variants = [
+    masking_variants = base_cfg.robustness.mask_variants or [
         ("full_coverage", 0.6),
         ("relaxed_coverage", 0.4),
     ]
 
-    # Null constructions: 2 (conditioned resample + block bootstrap)
-    # Note: shift-null only valid for stationary time series; we use block bootstrap instead
-    null_types = [
+    null_types = base_cfg.robustness.null_variants or [
         ("conditioned_resample", NullType.CONDITIONED_RESAMPLE),
         ("block_bootstrap", NullType.BLOCK_BOOTSTRAP),
     ]
@@ -154,12 +151,13 @@ def run_robustness_sweeps(
                 cfg = base_cfg.clone()
                 cfg.candidates.threshold_sigma = thresh
                 cfg.windows.require_fractional_coverage = coverage
-                # Note: null_type is tracked for reporting but the actual null
-                # construction uses block bootstrap (the default in nulls.py)
+                cfg.stats.null_type = null_type
+                if base_cfg.robustness.n_resamples:
+                    cfg.stats.null_realizations = base_cfg.robustness.n_resamples
 
                 try:
-                    stats, geom, cand_df, win_df = run_single_analysis(
-                        per_sensor_series, positions, cfg, label
+                    stats, geom, cand_df, win_df, _ = run_single_analysis(
+                        per_sensor_series, positions, cfg, label, mode="robustness"
                     )
 
                     results.append({
@@ -183,7 +181,9 @@ def run_robustness_sweeps(
                         "geom_chi2": geom.chi2_obs,
                         "geom_p": geom.p_value,
                         "K1_killed": stats.p_clustering > 0.05 or stats.c_excess <= 0,
-                        "K2_killed": geom.p_value > 0.05 if not np.isnan(geom.p_value) else True,
+                        "K2_killed": geom.status == "COMPLETED" and geom.p_value is not None and geom.p_value > 0.05,
+                        "geom_status": geom.status,
+                        "geom_reason": geom.reason,
                     })
                 except Exception as e:
                     print(f"  Error: {e}")
@@ -223,6 +223,8 @@ def generate_summary_json(
     output_dir: Path,
     stats: GlobalStats,
     geom: GeometryResult,
+    counts_coverage: Dict[str, Any],
+    run_mode: str,
     robustness_results: Optional[List[Dict]] = None,
 ) -> Path:
     """Generate summary.json with all key metrics."""
@@ -238,9 +240,11 @@ def generate_summary_json(
             },
             "K2_no_propagation_geometry": {
                 "description": "Fitted propagation parameters indistinguishable from shuffled nulls",
-                "killed": geom.p_value > 0.05 if not np.isnan(geom.p_value) else True,
-                "chi2_obs": geom.chi2_obs if not np.isnan(geom.chi2_obs) else None,
-                "p_value": geom.p_value if not np.isnan(geom.p_value) else None,
+                "killed": geom.status == "COMPLETED" and geom.p_value is not None and geom.p_value > 0.05,
+                "status": geom.status,
+                "reason": geom.reason,
+                "chi2_obs": geom.chi2_obs if geom.chi2_obs is not None else None,
+                "p_value": geom.p_value if geom.p_value is not None else None,
                 "n_events_tested": geom.n_events,
             },
             "K3_no_cross_channel_coherence": {
@@ -262,17 +266,24 @@ def generate_summary_json(
             "c_excess_std": stats.c_excess_std,
             "c_z": stats.c_z,
             "p_clustering": stats.p_clustering,
+            "p_clustering_two_sided": stats.p_clustering_two_sided,
             "n_resamples": stats.n_resamples,
         },
         "geometry": {
-            "chi2_obs": geom.chi2_obs if not np.isnan(geom.chi2_obs) else None,
-            "p_value": geom.p_value if not np.isnan(geom.p_value) else None,
+            "status": geom.status,
+            "reason": geom.reason,
+            "chi2_obs": geom.chi2_obs if geom.chi2_obs is not None else None,
+            "p_value": geom.p_value if geom.p_value is not None else None,
             "n_events": geom.n_events,
         },
+        "counts_coverage": counts_coverage,
     }
 
     if robustness_results:
         summary["robustness"] = robustness_results
+
+    allow_null = {"geometry.chi2_obs", "geometry.p_value", "kill_conditions.K2_no_propagation_geometry.chi2_obs", "kill_conditions.K2_no_propagation_geometry.p_value"}
+    assert_finite_metrics(summary, allow_null, mode=run_mode)
 
     path = output_dir / "summary.json"
     with open(path, "w") as f:
@@ -287,9 +298,27 @@ def main() -> None:
                         help="Path to YAML config.")
     parser.add_argument("--mode", type=str, choices=["sanity", "full", "robustness"],
                         default="full", help="Run mode: sanity (quick), full, or robustness")
+    parser.add_argument("--robustness-thresholds", type=str, help="Comma-separated thresholds for robustness sweeps")
+    parser.add_argument("--robustness-masks", type=str, help="Comma-separated mask variants name:coverage (e.g., strict:0.6,lenient:0.4)")
+    parser.add_argument("--robustness-nulls", type=str, help="Comma-separated null variants (conditioned_resample,block_bootstrap,time_shift)")
+    parser.add_argument("--robustness-resamples", type=int, help="Override number of null resamples for robustness sweeps")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.robustness_thresholds:
+        cfg.robustness.thresholds = [float(x) for x in args.robustness_thresholds.split(",") if x]
+    if args.robustness_masks:
+        masks = []
+        for item in args.robustness_masks.split(","):
+            if not item:
+                continue
+            name, coverage = item.split(":")
+            masks.append((name, float(coverage)))
+        cfg.robustness.mask_variants = masks
+    if args.robustness_nulls:
+        cfg.robustness.null_variants = [(n, NullType(n)) for n in args.robustness_nulls.split(",") if n]
+    if args.robustness_resamples:
+        cfg.robustness.n_resamples = args.robustness_resamples
 
     # Adjust config based on mode
     if args.mode == "sanity":
@@ -312,8 +341,23 @@ def main() -> None:
 
     # Run main analysis
     print("\n=== Running main analysis ===")
-    stats, geom, candidate_frame, window_frame = run_single_analysis(
-        per_sensor_series, positions, cfg, "main"
+    stats, geom, candidate_frame, window_frame, windows = run_single_analysis(
+        per_sensor_series, positions, cfg, "main", mode=args.mode
+    )
+
+    thresholds_for_counts = cfg.candidates.robustness_thresholds or sorted({
+        cfg.candidates.subthreshold_sigma,
+        cfg.candidates.threshold_sigma,
+        max(cfg.candidates.threshold_sigma, cfg.candidates.subthreshold_sigma) + 1.0,
+    })
+    counts_coverage = compute_counts_coverage(
+        per_sensor_series=per_sensor_series,
+        windows=windows,
+        candidate_frame=candidate_frame,
+        neighbor_time=cfg.candidates.neighbor_time_seconds,
+        neighbor_angle=cfg.candidates.neighbor_angle_degrees,
+        thresholds=thresholds_for_counts,
+        geom=geom,
     )
 
     # Run robustness sweeps if requested
@@ -346,10 +390,11 @@ def main() -> None:
         cross_modality_ok=bool(mag_paths) and not candidate_frame.empty,
         run_label=cfg.run_label,
         config_path=Path(args.config),
+        counts_coverage=counts_coverage,
     )
 
     # Generate summary JSON
-    summary_path = generate_summary_json(output_dir, stats, geom, robustness_results)
+    summary_path = generate_summary_json(output_dir, stats, geom, counts_coverage, args.mode, robustness_results)
 
     print(f"\n=== Results ===")
     print(f"Report: {report_path}")
@@ -359,14 +404,16 @@ def main() -> None:
     # Print kill condition summary
     print("\n=== Kill Condition Summary ===")
     k1_killed = stats.p_clustering > 0.05 or stats.c_excess <= 0
-    k2_killed = geom.p_value > 0.05 if not np.isnan(geom.p_value) else True
+    k2_killed = geom.status == "COMPLETED" and geom.p_value is not None and geom.p_value > 0.05
     k3_killed = True  # Default
 
     print(f"K1 (No pockets beyond selection): {'KILLED' if k1_killed else 'NOT KILLED'}")
     print(f"   C_excess = {stats.c_excess:.4f} ± {stats.c_excess_std:.4f}, p = {stats.p_clustering:.4f}")
     print(f"K2 (No propagation geometry): {'KILLED' if k2_killed else 'NOT KILLED'}")
-    if not np.isnan(geom.p_value):
+    if geom.status == "COMPLETED" and geom.p_value is not None:
         print(f"   χ² = {geom.chi2_obs:.2f}, p = {geom.p_value:.4f}")
+    elif geom.status == "NOT_TESTABLE":
+        print(f"   Geometry NOT TESTABLE: {geom.reason}")
     else:
         print(f"   (geometry test not run or insufficient events)")
     print(f"K3 (No cross-channel coherence): {'KILLED' if k3_killed else 'NOT KILLED'}")

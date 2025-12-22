@@ -33,6 +33,7 @@ class GlobalStats:
     c_excess_std: float
     c_z: float
     p_clustering: float
+    p_clustering_two_sided: float
 
     # Metadata
     n_resamples: int
@@ -160,14 +161,14 @@ def compute_debiased_stats(
     """
     if candidates.empty:
         return GlobalStats(
-            fano_obs=np.nan, fano_null_mean=1.0, fano_null_std=0.0, fano_z=0.0, p_fano=1.0,
+            fano_obs=0.0, fano_null_mean=1.0, fano_null_std=0.0, fano_z=0.0, p_fano=1.0,
             c_obs=0.0, c_null_mean=0.0, c_null_std=0.0, c_excess=0.0, c_excess_std=0.0,
-            c_z=0.0, p_clustering=1.0, n_resamples=0, sensor_weights={},
+            c_z=0.0, p_clustering=1.0, p_clustering_two_sided=1.0, n_resamples=0, sensor_weights={},
         )
 
     counts = candidates.groupby("sensor").size()
-    fano_obs = compute_fano(counts)
-    c_obs = compute_clustering(candidates, cand_cfg)
+    fano_obs = float(np.nan_to_num(compute_fano(counts), nan=0.0, posinf=0.0, neginf=0.0))
+    c_obs = float(np.nan_to_num(compute_clustering(candidates, cand_cfg), nan=0.0, posinf=0.0, neginf=0.0))
 
     # Stream null catalogs one at a time (memory efficient)
     fano_null = []
@@ -191,6 +192,7 @@ def compute_debiased_stats(
         stats_cfg.allow_time_shift_null,
         stats_cfg.random_seed,
         show_progress=True,
+        null_type=getattr(stats_cfg, "null_type", None),
     )
 
     for cat in null_iter:
@@ -199,8 +201,12 @@ def compute_debiased_stats(
 
         # Compute stats for this single catalog
         null_counts = cat.groupby("sensor").size()
-        fano_null.append(compute_fano(null_counts))
-        c_null.append(compute_clustering(cat, cand_cfg))
+        fano_val = compute_fano(null_counts)
+        clust_val = compute_clustering(cat, cand_cfg)
+        if np.isnan(fano_val) or np.isnan(clust_val):
+            continue
+        fano_null.append(fano_val)
+        c_null.append(clust_val)
         n_processed += 1
 
         # Memory monitoring (check every 10 iterations to reduce overhead)
@@ -227,6 +233,8 @@ def compute_debiased_stats(
     c_excess_std = c_null_std  # Uncertainty from null distribution
     c_z = c_excess / c_null_std if c_null_std > 0 else 0.0
     p_clustering = compute_empirical_pvalue(c_obs, c_null)
+    # two-sided approximation from Z (Gaussian tail)
+    p_clustering_two_sided = float(min(1.0, np.math.erfc(abs(c_z) / np.sqrt(2))))
 
     # Weight sensors inversely by their counts to avoid dominance
     weights = {sensor: 1.0 / (count if count else 1) for sensor, count in counts.items()}
@@ -246,6 +254,7 @@ def compute_debiased_stats(
         c_excess_std=c_excess_std,
         c_z=c_z,
         p_clustering=p_clustering,
+        p_clustering_two_sided=p_clustering_two_sided,
         n_resamples=n_processed,
         sensor_weights=weights,
     )

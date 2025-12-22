@@ -5,20 +5,22 @@ Report generation for the MV-O1B pocket test.
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .geometry import GeometryResult
 from .stats import GlobalStats
+from .windows import Window
 
 
 def format_kill_conditions(stats: GlobalStats, geom: GeometryResult, cross_modality_ok: bool) -> Dict[str, Dict[str, Any]]:
     """Produce kill-condition status with details."""
     k1_killed = stats.p_clustering > 0.05 or stats.c_excess <= 0
-    k2_killed = geom.p_value > 0.05 if not np.isnan(geom.p_value) else True
+    k2_killed = geom.status == "COMPLETED" and geom.p_value is not None and geom.p_value > 0.05
     k3_killed = not cross_modality_ok
 
     return {
@@ -28,14 +30,98 @@ def format_kill_conditions(stats: GlobalStats, geom: GeometryResult, cross_modal
             "description": "C_excess consistent with 0 under robustness sweeps",
         },
         "K2": {
-            "status": "KILLED" if k2_killed else "NOT KILLED",
+            "status": "KILLED" if k2_killed else ("NOT_TESTABLE" if geom.status == "NOT_TESTABLE" else "NOT KILLED"),
             "killed": k2_killed,
             "description": "Propagation geometry indistinguishable from shuffled nulls",
+            "reason": geom.reason,
         },
         "K3": {
             "status": "KILLED" if k3_killed else "NOT KILLED",
             "killed": k3_killed,
             "description": "No cross-channel (GNSS-magnetometer) coherence",
+        },
+    }
+
+
+def _quantiles(series: Iterable[float], keys: Tuple[float, ...]) -> Dict[str, Optional[float]]:
+    arr = pd.Series(list(series), dtype=float)
+    if arr.empty:
+        return {f"p{int(k*100)}": None for k in keys}
+    return {f"p{int(k*100)}": float(arr.quantile(k)) for k in keys}
+
+
+def _basic_stats(series: Iterable[float]) -> Dict[str, Optional[float]]:
+    arr = pd.Series(list(series), dtype=float)
+    if arr.empty:
+        return {"min": None, "median": None, "max": None}
+    return {
+        "min": float(arr.min()),
+        "median": float(arr.median()),
+        "max": float(arr.max()),
+    }
+
+
+def compute_counts_coverage(
+    per_sensor_series: Dict[str, pd.DataFrame],
+    windows: List[Window],
+    candidate_frame: pd.DataFrame,
+    neighbor_time: float,
+    neighbor_angle: Optional[float],
+    thresholds: List[float],
+    geom: GeometryResult,
+) -> Dict[str, Any]:
+    """Aggregate counts/coverage metrics for auditing."""
+    n_sensors_total = len(per_sensor_series)
+    window_frame = pd.DataFrame([w.__dict__ for w in windows]) if windows else pd.DataFrame(columns=["sensor", "start", "end", "quality_score", "cadence_seconds"])
+    n_windows_total = len(window_frame)
+    window_durations = ((pd.to_datetime(window_frame["end"]) - pd.to_datetime(window_frame["start"])).dt.total_seconds()) if not window_frame.empty else pd.Series([], dtype=float)
+    coverage_fraction = window_frame.groupby("sensor")["quality_score"].mean() if "quality_score" in window_frame else pd.Series([], dtype=float)
+    masked_fraction = 1 - coverage_fraction
+
+    # Candidate statistics
+    n_candidates_total = len(candidate_frame)
+    candidates_per_sensor = candidate_frame.groupby("sensor").size() if not candidate_frame.empty else pd.Series([], dtype=int)
+    candidates_per_window = candidate_frame[candidate_frame["window_index"] >= 0].groupby("window_index").size() if not candidate_frame.empty else pd.Series([], dtype=int)
+    snr_series = candidate_frame["sigma"] if "sigma" in candidate_frame else pd.Series([], dtype=float)
+    threshold_counts = {f">={thr}": int((candidate_frame["sigma"] >= thr).sum()) if not candidate_frame.empty else 0 for thr in thresholds}
+
+    # Pair statistics
+    n_events = len(candidate_frame)
+    n_pairs_total = int(n_events * (n_events - 1) // 2)
+    sensor_counts = candidate_frame.groupby("sensor").size() if not candidate_frame.empty else pd.Series([], dtype=int)
+    pairs_per_sensor = []
+    total_events = sensor_counts.sum()
+    for _, count in sensor_counts.items():
+        pairs = count * (total_events - count) + count * (count - 1) / 2
+        pairs_per_sensor.append(pairs)
+
+    return {
+        "input_coverage": {
+            "n_sensors_total": n_sensors_total,
+            "n_sensors_used": int(window_frame["sensor"].nunique()) if not window_frame.empty else 0,
+            "n_windows_total": n_windows_total,
+            "window_duration_s": {**_basic_stats(window_durations), **_quantiles(window_durations, (0.1, 0.5, 0.9, 0.99))},
+            "per_sensor_masked_fraction": {**_basic_stats(masked_fraction), **_quantiles(masked_fraction, (0.1, 0.5, 0.9, 0.99))},
+        },
+        "candidate_catalog": {
+            "n_candidates_total": n_candidates_total,
+            "per_sensor": {**_basic_stats(candidates_per_sensor), **_quantiles(candidates_per_sensor, (0.1, 0.5, 0.9, 0.99))},
+            "per_window": {**_basic_stats(candidates_per_window), **_quantiles(candidates_per_window, (0.1, 0.5, 0.9, 0.99))},
+            "sigma_distribution": {**_basic_stats(snr_series), **_quantiles(snr_series, (0.5, 0.9, 0.99))},
+            "threshold_counts": threshold_counts,
+        },
+        "pair_statistics": {
+            "n_pairs_total": n_pairs_total,
+            "n_sensors_with_pairs": int(sensor_counts.shape[0]),
+            "pairs_per_sensor": {**_basic_stats(pairs_per_sensor), **_quantiles(pairs_per_sensor, (0.1, 0.5, 0.9, 0.99))},
+            "neighbor_time_s": neighbor_time,
+            "neighbor_angle_deg": neighbor_angle,
+        },
+        "geometry_preconditions": {
+            "n_candidate_events_total": n_events,
+            "n_coincidences_used": int(sensor_counts.count()),
+            "n_events_tested_geometry": geom.n_events,
+            "reason": geom.reason,
         },
     }
 
@@ -47,6 +133,7 @@ def generate_report(
     cross_modality_ok: bool,
     run_label: str,
     config_path: Optional[Path],
+    counts_coverage: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Write markdown report with kill conditions."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +158,35 @@ def generate_report(
         "",
         "---",
         "",
+        "## Counts & Coverage",
+        "",
+    ]
+
+    if counts_coverage:
+        icov = counts_coverage["input_coverage"]
+        cat = counts_coverage["candidate_catalog"]
+        pairs = counts_coverage["pair_statistics"]
+        geom_pre = counts_coverage["geometry_preconditions"]
+        lines.extend([
+            f"- **Sensors total/used:** {icov['n_sensors_total']} / {icov['n_sensors_used']}",
+            f"- **Windows:** {icov['n_windows_total']}",
+            f"- **Window duration (s):** min={icov['window_duration_s']['min']}, median={icov['window_duration_s']['median']}, max={icov['window_duration_s']['max']}",
+            f"- **Masked fraction per sensor (p50/p90/p99):** {icov['per_sensor_masked_fraction']['p50']}, {icov['per_sensor_masked_fraction']['p90']}, {icov['per_sensor_masked_fraction']['p99']}",
+            f"- **Candidates total:** {cat['n_candidates_total']}",
+            f"- **Candidates per sensor (p50/p90/p99):** {cat['per_sensor']['p50']}, {cat['per_sensor']['p90']}, {cat['per_sensor']['p99']}",
+            f"- **Candidates per window (p50/p90/p99):** {cat['per_window']['p50']}, {cat['per_window']['p90']}, {cat['per_window']['p99']}",
+            f"- **Sigma distribution (p50/p90/p99):** {cat['sigma_distribution']['p50']}, {cat['sigma_distribution']['p90']}, {cat['sigma_distribution']['p99']}",
+            f"- **Threshold counts:** {cat['threshold_counts']}",
+            f"- **Total pairs evaluated:** {pairs['n_pairs_total']}",
+            f"- **Pairs per sensor (p50/p90/p99):** {pairs['pairs_per_sensor']['p50']}, {pairs['pairs_per_sensor']['p90']}, {pairs['pairs_per_sensor']['p99']}",
+            f"- **Clustering neighborhood:** Δt={pairs['neighbor_time_s']} s, Δθ={pairs['neighbor_angle_deg']}",
+            f"- **Geometry preconditions:** n_candidate_events={geom_pre['n_candidate_events_total']}, n_events_tested={geom_pre['n_events_tested_geometry']}, reason={geom_pre.get('reason')}",
+            "",
+            "---",
+            "",
+        ])
+
+    lines.extend([
         "## Fano Factor Statistics",
         "",
         f"- **Fano observed:** {stats.fano_obs:.4f}",
@@ -85,25 +201,28 @@ def generate_report(
         f"- **C_null mean:** {stats.c_null_mean:.6f}",
         f"- **C_null std:** {stats.c_null_std:.6f}",
         f"- **C_excess:** {stats.c_excess:.6f} ± {stats.c_excess_std:.6f}",
-        f"- **Clustering Z-score:** {stats.c_z:.4f}",
-        f"- **Clustering p-value:** {stats.p_clustering:.4f}",
+        f"- **Clustering Z-score (signed):** {stats.c_z:.4f}",
+        f"- **Clustering p-value (one-sided):** {stats.p_clustering:.4f}",
+        f"- **Clustering p-value (two-sided):** {getattr(stats, 'p_clustering_two_sided', math.nan):.4f}",
         f"- **Number of resamples:** {stats.n_resamples}",
         "",
         "---",
         "",
         "## Geometry Consistency (K2)",
         "",
-    ]
+    ])
 
-    if not np.isnan(geom.chi2_obs):
+    if geom.status == "COMPLETED":
         lines.extend([
             f"- **χ² observed:** {geom.chi2_obs:.4f}",
             f"- **p-value:** {geom.p_value:.4f}",
             f"- **Number of events:** {geom.n_events}",
             f"- **Fitted speed:** {geom.speed_kmps:.2f} km/s",
         ])
+    elif geom.status == "NOT_TESTABLE":
+        lines.append(f"*Geometry not testable: {geom.reason}*")
     else:
-        lines.append("*Geometry test not run or insufficient events.*")
+        lines.append("*Geometry test not run.*")
 
     lines.extend([
         "",
@@ -131,14 +250,19 @@ def generate_report(
         "",
     ])
 
-    if not np.isnan(geom.chi2_obs):
+    if geom.status == "COMPLETED":
         lines.extend([
             f"**Result:** χ² = {geom.chi2_obs:.4f}, p = {geom.p_value:.4f}",
             f"**Status:** {kill['K2']['status']}",
         ])
+    elif geom.status == "NOT_TESTABLE":
+        lines.extend([
+            f"**Result:** NOT TESTABLE ({geom.reason})",
+            f"**Status:** {kill['K2']['status']}",
+        ])
     else:
         lines.extend([
-            "**Result:** Insufficient events for geometry test",
+            "**Result:** Geometry test not run",
             f"**Status:** {kill['K2']['status']}",
         ])
 
@@ -164,7 +288,6 @@ def generate_report(
         "|--------|--------|",
     ])
 
-    # Show top 20 sensors by weight
     sorted_weights = sorted(stats.sensor_weights.items(), key=lambda x: x[1], reverse=True)
     for sensor, weight in sorted_weights[:20]:
         lines.append(f"| {sensor} | {weight:.6f} |")
@@ -244,7 +367,6 @@ def generate_robustness_report(
         "",
     ])
 
-    # Analyze K1 robustness
     k1_killed_count = sum(1 for r in robustness_results if r.get("K1_killed", True) and "error" not in r)
     k1_total = sum(1 for r in robustness_results if "error" not in r)
 
@@ -262,7 +384,6 @@ def generate_robustness_report(
     else:
         lines.append("**Conclusion:** K1 result varies with configuration - marginal evidence.")
 
-    # Analyze K2 robustness
     k2_killed_count = sum(1 for r in robustness_results if r.get("K2_killed", True) and "error" not in r)
 
     lines.extend([
@@ -288,8 +409,7 @@ def generate_robustness_report(
         "",
     ])
 
-    # Group by threshold
-    for thresh in [3.0, 4.0, 5.0]:
+    for thresh in {r.get("threshold_sigma") for r in robustness_results if "threshold_sigma" in r and "error" not in r}:
         thresh_results = [r for r in robustness_results if r.get("threshold_sigma") == thresh and "error" not in r]
         if not thresh_results:
             continue

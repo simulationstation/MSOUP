@@ -5,7 +5,7 @@ Null construction conditioned on sensitivity windows.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -125,11 +125,12 @@ def generate_null_catalogs(
     allow_time_shift: bool,
     seed: int,
     show_progress: bool = True,
+    null_type: NullType = NullType.BLOCK_BOOTSTRAP,
 ) -> List[pd.DataFrame]:
     """Generate null catalogs conditioned on windows (legacy list version)."""
     return list(iter_null_catalogs(
         candidates, windows, n_realizations, block_length,
-        allow_time_shift, seed, show_progress
+        allow_time_shift, seed, show_progress, null_type
     ))
 
 
@@ -141,6 +142,7 @@ def iter_null_catalogs(
     allow_time_shift: bool,
     seed: int,
     show_progress: bool = True,
+    null_type: NullType = NullType.BLOCK_BOOTSTRAP,
 ):
     """
     Generate null catalogs as a memory-efficient generator.
@@ -153,7 +155,17 @@ def iter_null_catalogs(
     if show_progress:
         iterator = tqdm(iterator, desc="Generating nulls", leave=False)
     for i in iterator:
-        if use_time_shift and i % 2 == 0:
+        if null_type == NullType.TIME_SHIFT:
+            if not use_time_shift:
+                # fall back to conditioned resample if coverage insufficient
+                yield window_conditioned_resample(candidates, windows, block_length, rng)
+                continue
             yield time_shift_resample(candidates, windows, rng)
-        else:
-            yield window_conditioned_resample(candidates, windows, block_length, rng)
+            continue
+
+        if use_time_shift and i % 2 == 0 and null_type == NullType.BLOCK_BOOTSTRAP:
+            yield time_shift_resample(candidates, windows, rng)
+            continue
+
+        # Default conditioned/block bootstrap
+        yield window_conditioned_resample(candidates, windows, block_length, rng)
