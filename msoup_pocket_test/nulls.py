@@ -9,6 +9,7 @@ from typing import List
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 
 class NullType(Enum):
@@ -122,12 +123,16 @@ def generate_null_catalogs(
     block_length: int,
     allow_time_shift: bool,
     seed: int,
+    show_progress: bool = True,
 ) -> List[pd.DataFrame]:
     """Generate null catalogs conditioned on windows."""
     rng = np.random.default_rng(seed)
     use_time_shift = allow_time_shift and can_time_shift(windows)
     catalogs: List[pd.DataFrame] = []
-    for i in range(n_realizations):
+    iterator = range(n_realizations)
+    if show_progress:
+        iterator = tqdm(iterator, desc="Generating nulls", leave=False)
+    for i in iterator:
         if use_time_shift and i % 2 == 0:
             catalogs.append(time_shift_resample(candidates, windows, rng))
         else:

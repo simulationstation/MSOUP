@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 from .config import CandidateConfig, StatsConfig
 from .nulls import generate_null_catalogs
@@ -157,16 +158,21 @@ def compute_debiased_stats(
     compute_fn = partial(_compute_null_stats, cand_cfg=cand_cfg)
 
     if n_procs > 1 and len(null_catalogs) > 1:
-        # Parallel execution
+        # Parallel execution with progress bar
         with mp.Pool(processes=n_procs) as pool:
-            results = pool.map(compute_fn, null_catalogs)
+            results = list(tqdm(
+                pool.imap(compute_fn, null_catalogs),
+                total=len(null_catalogs),
+                desc=f"Computing null stats ({n_procs} cores)",
+                leave=False
+            ))
         fano_null = [r[0] for r in results if not np.isnan(r[0])]
         c_null = [r[1] for r in results if not np.isnan(r[1])]
     else:
-        # Serial fallback
+        # Serial fallback with progress
         fano_null = []
         c_null = []
-        for cat in null_catalogs:
+        for cat in tqdm(null_catalogs, desc="Computing null stats", leave=False):
             if cat.empty:
                 continue
             null_counts = cat.groupby("sensor").size()

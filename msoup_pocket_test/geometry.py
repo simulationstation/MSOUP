@@ -9,6 +9,7 @@ from typing import Dict, Iterable, Tuple
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from .config import GeometryConfig
 
@@ -96,7 +97,7 @@ def evaluate_geometry(
     # Generate null distribution by shuffling arrival times
     rng = np.random.default_rng(cfg.n_shuffles + cfg.min_sensors)
     null_chi2s = []
-    for _ in range(cfg.n_shuffles):
+    for _ in tqdm(range(cfg.n_shuffles), desc="Geometry shuffles", leave=False):
         shuffled_times = first_hits["peak_time"].sample(frac=1.0, replace=False, random_state=rng.integers(0, 1e9))
         shuffled_times = shuffled_times.reset_index(drop=True)
         null_normal, null_speed = _fit_plane_times(valid.reset_index(), shuffled_times)
