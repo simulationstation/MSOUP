@@ -7,7 +7,7 @@ data:
   magnetometer_glob: "data/mag/*/2022/*.csv"
   chunk_hours: 6
   cache_dir: "results/cache"
-  # Memory-safety limits (0 = no limit, recommended: 30-60 for 11GB RAM)
+  # Safe limits for development; set to 0 for full coverage after streaming is implemented
   max_clk_files: 30
   max_mag_files: 30
 
@@ -56,6 +56,7 @@ resources:
   pair_mode: binned
   time_bin_seconds: 60
   max_candidates_in_memory: 750000
+  rss_check_interval_steps: 5
 
 geometry:
   enable_geometry_test: true

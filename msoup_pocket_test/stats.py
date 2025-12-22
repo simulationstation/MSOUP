@@ -216,6 +216,100 @@ def _get_available_memory_mb() -> float:
         return float('inf')
 
 
+class WelfordAccumulator:
+    """Welford's online algorithm for mean and variance."""
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.mean = 0.0
+        self.m2 = 0.0
+
+    def update(self, value: float) -> None:
+        self.n += 1
+        delta = value - self.mean
+        self.mean += delta / self.n
+        delta2 = value - self.mean
+        self.m2 += delta * delta2
+
+    @property
+    def variance(self) -> float:
+        return self.m2 / self.n if self.n > 0 else 0.0
+
+    @property
+    def std(self) -> float:
+        return np.sqrt(self.variance)
+
+
+class OnlinePValueCounter:
+    """
+    Online p-value computation without storing all null values.
+
+    For one-sided p-values: counts how many nulls >= observed
+    For two-sided p-values: counts how many nulls have |null - mean| >= |obs - mean|
+
+    Since two-sided requires the mean, we use a two-pass approach where:
+    - First pass: accumulate mean via Welford
+    - After first pass: we can't do exact two-sided without storing values
+
+    Alternative approach for two-sided without storage:
+    - Track running mean, and for each null, compare |null - running_mean| vs |obs - running_mean|
+    - This is an approximation since running_mean changes, but converges to correct answer
+
+    We use the approximation approach for memory efficiency.
+    """
+
+    def __init__(self, observed: float) -> None:
+        self.observed = observed
+        self.n = 0
+        self.count_ge_obs = 0  # count(null >= obs) for one-sided
+        self.count_two_sided = 0  # count(|null - mean| >= |obs - mean|) approximation
+        self.running_mean = 0.0
+        self.m2 = 0.0  # For Welford variance
+
+    def update(self, null_value: float) -> None:
+        self.n += 1
+
+        # One-sided: count nulls >= observed
+        if null_value >= self.observed:
+            self.count_ge_obs += 1
+
+        # Update running mean (Welford)
+        delta = null_value - self.running_mean
+        self.running_mean += delta / self.n
+        delta2 = null_value - self.running_mean
+        self.m2 += delta * delta2
+
+        # Two-sided approximation using current running mean
+        obs_deviation = abs(self.observed - self.running_mean)
+        null_deviation = abs(null_value - self.running_mean)
+        if null_deviation >= obs_deviation:
+            self.count_two_sided += 1
+
+    @property
+    def p_one_sided(self) -> float:
+        """Empirical p-value (one-sided, greater-than)."""
+        if self.n == 0:
+            return 1.0
+        return float((self.count_ge_obs + 1) / (self.n + 1))
+
+    @property
+    def p_two_sided(self) -> float:
+        """Empirical p-value (two-sided, approximate)."""
+        if self.n == 0:
+            return 1.0
+        return float((self.count_two_sided + 1) / (self.n + 1))
+
+    @property
+    def mean(self) -> float:
+        return self.running_mean
+
+    @property
+    def std(self) -> float:
+        if self.n < 2:
+            return 0.0
+        return np.sqrt(self.m2 / self.n)
+
+
 def compute_debiased_stats(
     candidates: pd.DataFrame,
     windows: pd.DataFrame,
@@ -227,11 +321,10 @@ def compute_debiased_stats(
     """
     Compute C_excess and Fano with null debiasing.
 
-    Uses streaming to process one null catalog at a time, avoiding memory explosion.
+    Uses FULLY ONLINE streaming to process one null catalog at a time.
+    No null values are stored in memory - only running statistics and counters.
 
-    Args:
-        memory_limit_mb: If > 0, abort if process memory exceeds this limit.
-                        Default 0 means no limit (but will warn at 80% system RAM).
+    Memory complexity: O(1) for null resampling phase (regardless of n_resamples)
     """
     if candidates.empty:
         return GlobalStats(
@@ -275,32 +368,12 @@ def compute_debiased_stats(
     if monitor:
         monitor.check("after_observed")
 
-    class RunningStats:
-        def __init__(self) -> None:
-            self.n = 0
-            self.mean = 0.0
-            self.m2 = 0.0
-
-        def update(self, value: float) -> None:
-            self.n += 1
-            delta = value - self.mean
-            self.mean += delta / self.n
-            delta2 = value - self.mean
-            self.m2 += delta * delta2
-
-        @property
-        def variance(self) -> float:
-            return self.m2 / self.n if self.n > 0 else 0.0
-
-        @property
-        def std(self) -> float:
-            return np.sqrt(self.variance)
-
-    fano_stats = RunningStats()
-    c_stats = RunningStats()
-    fano_null_values: List[float] = []
-    c_null_values: List[float] = []
+    # Online accumulators - NO ARRAYS STORED
+    fano_pvalue = OnlinePValueCounter(fano_obs)
+    c_pvalue = OnlinePValueCounter(c_obs)
     n_processed = 0
+
+    rss_check_interval = getattr(stats_cfg, "rss_check_interval", 5)
 
     null_iter = iter_null_catalogs(
         candidates,
@@ -327,35 +400,32 @@ def compute_debiased_stats(
             max_candidates_in_memory=getattr(stats_cfg, "max_candidates_in_memory", 750000),
             unsafe=unsafe,
         )
+
         if np.isnan(fano_val) or np.isnan(clust_val):
             continue
-        fano_stats.update(fano_val)
-        c_stats.update(clust_val)
-        fano_null_values.append(fano_val)
-        c_null_values.append(clust_val)
+
+        # Update online accumulators (no storage!)
+        fano_pvalue.update(fano_val)
+        c_pvalue.update(clust_val)
         n_processed += 1
 
-        if monitor and n_processed % 5 == 0:
-            monitor.check("null_resample")
+        # Periodic memory check
+        if monitor and n_processed % rss_check_interval == 0:
+            monitor.check(f"null_resample_{n_processed}")
 
-    fano_null_mean = fano_stats.mean if fano_stats.n > 0 else 1.0
-    fano_null_std = fano_stats.std if fano_stats.n > 0 else 0.0
+    # Extract statistics from online accumulators
+    fano_null_mean = fano_pvalue.mean if n_processed > 0 else 1.0
+    fano_null_std = fano_pvalue.std if n_processed > 0 else 0.0
     fano_z = (fano_obs - fano_null_mean) / fano_null_std if fano_null_std > 0 else 0.0
+    p_fano = fano_pvalue.p_one_sided
 
-    more_extreme_fano = sum(1 for v in fano_null_values if v >= fano_obs) if fano_null_values else 0
-    p_fano = float((more_extreme_fano + 1) / (len(fano_null_values) + 1)) if fano_null_values else 1.0
-
-    c_null_mean = c_stats.mean if c_stats.n > 0 else 0.0
-    c_null_std = c_stats.std if c_stats.n > 0 else 0.0
+    c_null_mean = c_pvalue.mean if n_processed > 0 else 0.0
+    c_null_std = c_pvalue.std if n_processed > 0 else 0.0
     c_excess = c_obs - c_null_mean
     c_excess_std = c_null_std
     c_z = c_excess / c_null_std if c_null_std > 0 else 0.0
-    more_extreme = sum(1 for v in c_null_values if v >= c_obs)
-    p_clustering = float((more_extreme + 1) / (len(c_null_values) + 1)) if c_null_values else 1.0
-    two_sided_extreme = sum(1 for v in c_null_values if abs(v - c_null_mean) >= abs(c_obs - c_null_mean))
-    p_clustering_two_sided = (
-        float((two_sided_extreme + 1) / (len(c_null_values) + 1)) if c_null_values else 1.0
-    )
+    p_clustering = c_pvalue.p_one_sided
+    p_clustering_two_sided = c_pvalue.p_two_sided
 
     weights = {sensor: 1.0 / (count if count else 1) for sensor, count in counts.items()}
     total = sum(weights.values()) or 1.0

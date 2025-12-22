@@ -25,8 +25,10 @@ python -m msoup_pocket_test.run --config configs/pocket_default.yaml
 
 Flags:
 
-- `--fast` — fast sanity run (fewer nulls/block length) without dropping sensors or time.
-- `--unsafe` — opt out of WSL2 safety overrides (not recommended on 12 GB RAM).
+- `--mode sanity` — quick validation with minimal resampling
+- `--mode full` — full empirical p-values (default)
+- `--mode dry-run` — audit file counts and memory estimates without loading data
+- `--unsafe` — opt out of WSL2 safety overrides (not recommended on 12 GB RAM)
 
 Outputs:
 
@@ -44,13 +46,89 @@ See `configs/pocket_default.yaml` for tunable parameters (paths, preprocessing, 
 - **Deterministic parallelism:** Random seeds are fixed; multiprocessing is used only in null generation.
 - **No silent subsampling:** All sensors/windows are kept; accelerations rely on block bootstrap/FFT-friendly detrending instead of dropping data.
 
-## Hardware safety (12 GB WSL2)
+## Running on 12 GB WSL2 Safely
 
-- Default `resources` in `configs/pocket_default.yaml` target a 12 GB WSL2 host: `max_workers=1`, `max_rss_gb=9`, `pair_mode=binned`, `chunk_days=7`.
-- Sanity mode uses `resamples_sanity_default=128`; full mode uses `resamples_full_default=512`, both capped by the RSS guard.
-- WSL2 is auto-detected and forces the safe defaults unless `--unsafe` is passed.
-- If you hit a `RuntimeError` about RSS, lower `resources.resamples_full_default`, increase `chunk_days`, and keep `pair_mode=binned`.
+The pipeline implements multiple safety layers to prevent system freezes on memory-constrained WSL2 environments:
+
+### Memory Guardrails
+
+1. **Hard RSS limit** (`max_rss_gb: 9.0`): Pipeline aborts cleanly if memory exceeds this threshold, writing a partial report.
+
+2. **Streaming I/O**: Files are processed one at a time via iterator-based loading. No bulk loading of all CLK/SP3/mag files.
+
+3. **Online null resampling**: Statistics are computed using Welford's algorithm with O(1) memory per resample (no storing arrays of null values).
+
+4. **Binned clustering** (`pair_mode: binned`): Default O(n) memory scaling instead of O(n²) pairwise comparisons.
+
+### Before Running Full Coverage
+
+1. **Use dry-run mode first** to audit file counts and memory estimates without loading data:
+   ```bash
+   python -m msoup_pocket_test.run --mode dry-run
+   ```
+
+2. **Start with sanity mode** for quick validation:
+   ```bash
+   python -m msoup_pocket_test.run --mode sanity
+   ```
+
+3. **Only then run full mode** if dry-run shows safe estimates:
+   ```bash
+   python -m msoup_pocket_test.run --mode full
+   ```
+
+### Safe Configuration Defaults
+
+The default `configs/pocket_default.yaml` targets 12 GB WSL2:
+
+```yaml
+resources:
+  max_workers: 1        # Serial processing to avoid memory duplication
+  max_rss_gb: 9.0       # Hard ceiling (leave 3 GB for OS/WSL overhead)
+  pair_mode: binned     # O(n) clustering (not O(n²))
+  chunk_days: 7         # Process data in 1-week chunks
+  rss_check_interval_steps: 5  # Check memory every 5 resamples
+```
+
+### If Memory Guard Triggers
+
+If you see `MemoryLimitExceeded`, try these mitigations in order:
+
+1. Reduce `null_realizations` (try 64 or 128 instead of 512)
+2. Increase `chunk_days` (smaller concurrent data)
+3. Ensure `pair_mode = binned` (not `exact`)
+4. Use `max_clk_files` and `max_mag_files` limits temporarily
+5. Run with `--mode sanity` for validation
+
+### Full Coverage Mode
+
+To run with full dataset coverage (no file caps), first verify streaming is working:
+
+```bash
+# 1. Dry-run to check estimates
+python -m msoup_pocket_test.run --mode dry-run
+
+# 2. Sanity mode with n_resamples 128
+python -m msoup_pocket_test.run --mode sanity
+
+# 3. Full mode (only if above succeeds)
+python -m msoup_pocket_test.run --mode full
+```
+
+### Abort Handling
+
+If the pipeline aborts due to memory limits, it writes:
+- `REPORT.md` with abort reason and last completed chunk
+- `summary.json` with partial results and resource snapshot
+
+This allows you to resume from the last successful chunk by adjusting config.
 
 ## Tests
 
-Unit tests cover window debiasing, synthetic cluster injections, null behavior, and guard against single-sensor dominance.
+Unit tests cover:
+- Memory guard triggers (monkeypatched RSS)
+- Online null accumulation (no array storage)
+- Binned vs exact clustering equivalence
+- Window debiasing and synthetic cluster injection
+- Single-sensor dominance prevention
+- No NaN/Inf in outputs

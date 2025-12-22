@@ -101,6 +101,7 @@ class ResourceConfig:
     pair_mode: str = "binned"
     time_bin_seconds: int = 60
     max_candidates_in_memory: int = 750000
+    rss_check_interval_steps: int = 5  # Check RSS every N resamples/chunks
 
 
 @dataclass
