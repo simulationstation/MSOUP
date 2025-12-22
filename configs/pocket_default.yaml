@@ -44,7 +44,7 @@ stats:
   allow_time_shift_null: false
   pair_mode: binned
   time_bin_seconds: 60
-  max_rss_gb: 9.0
+  max_rss_gb: 8.0
   max_candidates_in_memory: 750000
 
 resources:
@@ -52,7 +52,7 @@ resources:
   chunk_days: 7
   resamples_sanity_default: 128
   resamples_full_default: 512
-  max_rss_gb: 9.0
+  max_rss_gb: 8.0
   pair_mode: binned
   time_bin_seconds: 60
   max_candidates_in_memory: 750000

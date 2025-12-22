@@ -193,7 +193,7 @@ def plot_geometry_diagnostics(
     output_dir: Path,
 ) -> Optional[Path]:
     """Plot geometry fit diagnostics."""
-    if np.isnan(geom.chi2_obs) or geom.n_events == 0:
+    if geom.chi2_obs is None or geom.n_events == 0:
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
