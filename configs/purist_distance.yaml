@@ -28,6 +28,22 @@ probes:
     is_local: false
     z_column: z
     sigma_column: sigma
+  - name: pantheon_high_ge_0p7
+    label: "Pantheon+ SNe Ia (z>=0.7, robustness)"
+    path: data_ignored/probes/pantheon_high_ge_0p7.csv
+    kernel: K1
+    type: sn
+    is_local: false
+    z_column: z
+    sigma_column: sigma
+  - name: pantheon_high_ge_1p0
+    label: "Pantheon+ SNe Ia (z>=1.0, robustness)"
+    path: data_ignored/probes/pantheon_high_ge_1p0.csv
+    kernel: K1
+    type: sn
+    is_local: false
+    z_column: z
+    sigma_column: sigma
   - name: sdss_bao
     label: "SDSS eBOSS DR16 BAO"
     path: data_ignored/probes/sdss_bao.csv
