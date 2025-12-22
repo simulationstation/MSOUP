@@ -5,17 +5,27 @@ Parsing uses tolerant fallbacks (CSV with time,value columns) to make the
 pipeline usable in test environments while remaining compatible with standard
 IGS text products. Streaming generators are provided to avoid loading a full
 year of products into memory.
+
+Supports gzip-compressed files (.gz extension).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import itertools
 from pathlib import Path
-from typing import Dict, Generator, Iterable, List, Optional
+from typing import Dict, Generator, Iterable, List, Optional, TextIO
 
 import numpy as np
 import pandas as pd
+
+
+def _open_file(path: Path) -> TextIO:
+    """Open a file, handling gzip compression if needed."""
+    if path.suffix.lower() == ".gz" or str(path).endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="ignore")
+    return open(path, "r", encoding="utf-8", errors="ignore")
 
 
 def _parse_sp3_epoch(line: str) -> Optional[dt.datetime]:
@@ -47,11 +57,12 @@ def load_sp3_positions(paths: Iterable[Path]) -> pd.DataFrame:
     Load satellite positions from SP3 files.
 
     Returns a DataFrame with columns: time, satellite, x, y, z.
+    Supports gzip-compressed files.
     """
     rows: List[Dict] = []
     for path in paths:
         current_epoch: Optional[dt.datetime] = None
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        with _open_file(path) as f:
             for line in f:
                 if line.startswith("*"):
                     maybe_epoch = _parse_sp3_epoch(line)
@@ -65,14 +76,31 @@ def load_sp3_positions(paths: Iterable[Path]) -> pd.DataFrame:
 
 
 def _parse_clk_line(line: str) -> Optional[Dict]:
+    """Parse a RINEX CLK data line.
+
+    Format: TYPE ID YYYY MM DD HH MM SS.SSSSSS N bias [sigma]
+    Example: AS G01 2022  1  1  0  0  0.000000  1    0.123456789012E-03
+    """
     parts = line.strip().split()
-    if len(parts) < 3:
+    if len(parts) < 9:
+        return None
+    rec_type = parts[0]
+    # Only process satellite clocks (AS) for now
+    if rec_type not in ("AS", "AR"):
         return None
     try:
-        time = pd.to_datetime(" ".join(parts[:2]))
-        sat = parts[2]
-        bias = float(parts[3]) if len(parts) > 3 else float(parts[-1])
-        return {"time": time, "satellite": sat, "bias_s": bias}
+        sat_id = parts[1]
+        year = int(parts[2])
+        month = int(parts[3])
+        day = int(parts[4])
+        hour = int(parts[5])
+        minute = int(parts[6])
+        second = float(parts[7])
+        # n_values = int(parts[8])
+        bias = float(parts[9])
+        time = dt.datetime(year, month, day, hour, minute, int(second),
+                          int((second % 1) * 1e6))
+        return {"time": time, "satellite": sat_id, "bias_s": bias, "type": rec_type}
     except (ValueError, IndexError):
         return None
 
@@ -82,22 +110,32 @@ def load_clk_series(paths: Iterable[Path]) -> pd.DataFrame:
     Load clock residuals from CLK files.
 
     The parser tolerates simplified CSV files with columns: time, satellite,
-    bias_s. Standard IGS CLK text is also supported for the subset of fields we
-    need.
+    bias_s. Standard IGS/GFZ CLK text (RINEX format) is also supported.
+    Supports gzip-compressed files (.gz).
     """
     rows: List[Dict] = []
     for path in paths:
-        suffix = path.suffix.lower()
-        if suffix == ".csv":
-            df = pd.read_csv(path, parse_dates=["time"])
+        path_str = str(path).lower()
+        # Handle CSV files (possibly gzipped)
+        if ".csv" in path_str:
+            if path_str.endswith(".gz"):
+                df = pd.read_csv(path, parse_dates=["time"], compression="gzip")
+            else:
+                df = pd.read_csv(path, parse_dates=["time"])
             expected = {"time", "satellite", "bias_s"}
             if not expected.issubset(df.columns):
                 raise ValueError(f"CSV CLK file missing columns: {expected - set(df.columns)}")
             rows.extend(df.to_dict("records"))
             continue
 
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        # Parse RINEX CLK format
+        with _open_file(path) as f:
+            in_header = True
             for line in f:
+                if in_header:
+                    if "END OF HEADER" in line:
+                        in_header = False
+                    continue
                 if not line.strip() or line.startswith("#"):
                     continue
                 parsed = _parse_clk_line(line)

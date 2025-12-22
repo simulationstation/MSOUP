@@ -4,10 +4,18 @@ Null construction conditioned on sensitivity windows.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import List
 
 import numpy as np
 import pandas as pd
+
+
+class NullType(Enum):
+    """Type of null construction to use."""
+    CONDITIONED_RESAMPLE = "conditioned_resample"
+    BLOCK_BOOTSTRAP = "block_bootstrap"
+    TIME_SHIFT = "time_shift"
 
 
 def can_time_shift(windows: pd.DataFrame) -> bool:

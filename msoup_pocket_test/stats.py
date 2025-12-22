@@ -16,13 +16,26 @@ from .nulls import generate_null_catalogs
 
 @dataclass
 class GlobalStats:
-    fano_factor: float
+    """Container for all computed statistics."""
+    # Fano factor statistics
+    fano_obs: float
+    fano_null_mean: float
+    fano_null_std: float
+    fano_z: float
+    p_fano: float
+
+    # Clustering statistics
     c_obs: float
+    c_null_mean: float
+    c_null_std: float
     c_excess: float
-    p_value: float
+    c_excess_std: float
+    c_z: float
+    p_clustering: float
+
+    # Metadata
+    n_resamples: int
     sensor_weights: Dict[str, float]
-    null_mean: float
-    null_std: float
 
 
 def compute_fano(counts: Iterable[int]) -> float:
@@ -91,11 +104,18 @@ def compute_debiased_stats(
     cand_cfg: CandidateConfig,
 ) -> GlobalStats:
     """Compute C_excess and Fano with null debiasing."""
-    counts = candidates.groupby("sensor").size()
-    fano = compute_fano(counts)
+    if candidates.empty:
+        return GlobalStats(
+            fano_obs=np.nan, fano_null_mean=1.0, fano_null_std=0.0, fano_z=0.0, p_fano=1.0,
+            c_obs=0.0, c_null_mean=0.0, c_null_std=0.0, c_excess=0.0, c_excess_std=0.0,
+            c_z=0.0, p_clustering=1.0, n_resamples=0, sensor_weights={},
+        )
 
+    counts = candidates.groupby("sensor").size()
+    fano_obs = compute_fano(counts)
     c_obs = compute_clustering(candidates, cand_cfg)
 
+    # Generate null catalogs
     null_catalogs = generate_null_catalogs(
         candidates,
         windows,
@@ -104,11 +124,30 @@ def compute_debiased_stats(
         stats_cfg.allow_time_shift_null,
         stats_cfg.random_seed,
     )
-    c_null = [compute_clustering(cat, cand_cfg) for cat in null_catalogs if not cat.empty]
-    null_mean = float(np.nanmean(c_null)) if c_null else 0.0
-    null_std = float(np.nanstd(c_null)) if c_null else 0.0
-    c_excess = c_obs - null_mean
-    p_value = compute_empirical_pvalue(c_obs, c_null)
+
+    # Compute Fano and clustering for each null
+    fano_null = []
+    c_null = []
+    for cat in null_catalogs:
+        if cat.empty:
+            continue
+        null_counts = cat.groupby("sensor").size()
+        fano_null.append(compute_fano(null_counts))
+        c_null.append(compute_clustering(cat, cand_cfg))
+
+    # Fano statistics
+    fano_null_mean = float(np.nanmean(fano_null)) if fano_null else 1.0
+    fano_null_std = float(np.nanstd(fano_null)) if fano_null else 0.0
+    fano_z = (fano_obs - fano_null_mean) / fano_null_std if fano_null_std > 0 else 0.0
+    p_fano = compute_empirical_pvalue(fano_obs, fano_null)
+
+    # Clustering statistics
+    c_null_mean = float(np.nanmean(c_null)) if c_null else 0.0
+    c_null_std = float(np.nanstd(c_null)) if c_null else 0.0
+    c_excess = c_obs - c_null_mean
+    c_excess_std = c_null_std  # Uncertainty from null distribution
+    c_z = c_excess / c_null_std if c_null_std > 0 else 0.0
+    p_clustering = compute_empirical_pvalue(c_obs, c_null)
 
     # Weight sensors inversely by their counts to avoid dominance
     weights = {sensor: 1.0 / (count if count else 1) for sensor, count in counts.items()}
@@ -116,11 +155,18 @@ def compute_debiased_stats(
     weights = {k: v / total for k, v in weights.items()}
 
     return GlobalStats(
-        fano_factor=fano,
+        fano_obs=fano_obs,
+        fano_null_mean=fano_null_mean,
+        fano_null_std=fano_null_std,
+        fano_z=fano_z,
+        p_fano=p_fano,
         c_obs=c_obs,
+        c_null_mean=c_null_mean,
+        c_null_std=c_null_std,
         c_excess=c_excess,
-        p_value=p_value,
+        c_excess_std=c_excess_std,
+        c_z=c_z,
+        p_clustering=p_clustering,
+        n_resamples=len(null_catalogs),
         sensor_weights=weights,
-        null_mean=null_mean,
-        null_std=null_std,
     )

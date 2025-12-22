@@ -15,10 +15,13 @@ from .config import GeometryConfig
 
 @dataclass
 class GeometryResult:
-    speed_kmps: float
-    normal: np.ndarray
+    """Container for geometry test results."""
+    chi2_obs: float
+    null_chi2s: np.ndarray  # Array of chi2 from shuffled nulls
     p_value: float
-    n_sensors: int
+    n_events: int
+    speed_kmps: float = 0.0
+    normal: np.ndarray = None
 
 
 def _fit_plane_times(positions: pd.DataFrame, times: pd.Series) -> Tuple[np.ndarray, float]:
@@ -40,6 +43,22 @@ def _fit_plane_times(positions: pd.DataFrame, times: pd.Series) -> Tuple[np.ndar
     return normal, speed
 
 
+def _compute_chi2(positions: pd.DataFrame, times: pd.Series, normal: np.ndarray, speed: float) -> float:
+    """Compute chi-squared residual for plane wave fit."""
+    if positions.empty or len(times) == 0:
+        return np.nan
+    r = positions[["x", "y", "z"]].to_numpy() / 1000.0  # m -> km
+    t = (times - times.min()).dt.total_seconds().to_numpy()
+    # Predicted arrival times from plane wave: t_pred = (n · r) / v
+    if speed == 0:
+        return np.nan
+    t_pred = np.dot(r, normal) / speed
+    t_pred = t_pred - t_pred.min()  # Normalize to start at 0
+    residuals = t - t_pred
+    chi2 = np.sum(residuals ** 2)
+    return float(chi2)
+
+
 def evaluate_geometry(
     candidate_frame: pd.DataFrame,
     positions: pd.DataFrame,
@@ -47,29 +66,52 @@ def evaluate_geometry(
 ) -> GeometryResult:
     """
     Evaluate propagation geometry by comparing fitted plane speed/normal against
-    shuffled arrival times.
+    shuffled arrival times. Uses chi-squared as the test statistic.
     """
     df = candidate_frame
-    if df.empty or len(df["sensor"].unique()) < cfg.min_sensors:
-        return GeometryResult(speed_kmps=np.nan, normal=np.zeros(3), p_value=1.0, n_sensors=len(df["sensor"].unique()))
+    n_unique = len(df["sensor"].unique()) if not df.empty else 0
+
+    if df.empty or n_unique < cfg.min_sensors:
+        return GeometryResult(
+            chi2_obs=np.nan, null_chi2s=None, p_value=1.0, n_events=0,
+            speed_kmps=np.nan, normal=np.zeros(3)
+        )
 
     # Use first arrival per sensor
     first_hits = df.sort_values("peak_time").groupby("sensor").head(1)
     sensor_positions = positions.set_index("satellite").reindex(first_hits["sensor"])
     valid = sensor_positions.dropna()
     first_hits = first_hits.set_index("sensor").loc[valid.index].reset_index()
+
     if len(first_hits) < cfg.min_sensors:
-        return GeometryResult(speed_kmps=np.nan, normal=np.zeros(3), p_value=1.0, n_sensors=len(first_hits))
+        return GeometryResult(
+            chi2_obs=np.nan, null_chi2s=None, p_value=1.0, n_events=len(first_hits),
+            speed_kmps=np.nan, normal=np.zeros(3)
+        )
 
+    # Fit plane wave to observed data
     normal, speed = _fit_plane_times(valid.reset_index(), first_hits["peak_time"])
-    observed = speed
+    chi2_obs = _compute_chi2(valid.reset_index(), first_hits["peak_time"], normal, speed)
 
+    # Generate null distribution by shuffling arrival times
     rng = np.random.default_rng(cfg.n_shuffles + cfg.min_sensors)
-    shuffled_speeds = []
+    null_chi2s = []
     for _ in range(cfg.n_shuffles):
         shuffled_times = first_hits["peak_time"].sample(frac=1.0, replace=False, random_state=rng.integers(0, 1e9))
-        _, shuffle_speed = _fit_plane_times(valid.reset_index(), shuffled_times.reset_index(drop=True))
-        shuffled_speeds.append(shuffle_speed)
+        shuffled_times = shuffled_times.reset_index(drop=True)
+        null_normal, null_speed = _fit_plane_times(valid.reset_index(), shuffled_times)
+        null_chi2 = _compute_chi2(valid.reset_index(), shuffled_times, null_normal, null_speed)
+        null_chi2s.append(null_chi2)
 
-    p_value = (np.sum(np.array(shuffled_speeds) >= observed) + 1) / (len(shuffled_speeds) + 1)
-    return GeometryResult(speed_kmps=observed, normal=normal, p_value=p_value, n_sensors=len(first_hits))
+    null_chi2s = np.array(null_chi2s)
+    # P-value: fraction of null chi2 values <= observed (lower chi2 = better fit)
+    p_value = (np.sum(null_chi2s <= chi2_obs) + 1) / (len(null_chi2s) + 1)
+
+    return GeometryResult(
+        chi2_obs=chi2_obs,
+        null_chi2s=null_chi2s,
+        p_value=p_value,
+        n_events=len(first_hits),
+        speed_kmps=speed,
+        normal=normal
+    )

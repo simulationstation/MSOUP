@@ -2,9 +2,9 @@ run_label: pocket_default
 fast_mode: false
 
 data:
-  clk_glob: "data/igs/clk/*.clk"
-  sp3_glob: "data/igs/sp3/*.sp3"
-  magnetometer_glob: "data/magnetometer/*.csv"
+  clk_glob: "data/gfz/clk/2022/*.CLK.gz"
+  sp3_glob: "data/gfz/sp3/2022/*.SP3.gz"
+  magnetometer_glob: "data/mag/*/2022/*.csv"
   chunk_hours: 6
   cache_dir: "results/cache"
 

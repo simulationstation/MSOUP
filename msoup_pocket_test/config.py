@@ -154,6 +154,10 @@ class PocketConfig:
         with open(path, "w", encoding="utf-8") as f:
             yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
+    def clone(self) -> "PocketConfig":
+        """Return a deep copy of the configuration."""
+        return PocketConfig.from_dict(self.to_dict())
+
     def adjusted_for_fast_mode(self) -> "PocketConfig":
         """
         Return a copy with reduced workload for sanity checks.
@@ -165,7 +169,7 @@ class PocketConfig:
         if not self.fast_mode:
             return self
 
-        fast = PocketConfig.from_dict(self.to_dict())
+        fast = self.clone()
         fast.stats.null_realizations = min(self.stats.null_realizations, 32)
         fast.stats.block_length = min(self.stats.block_length, 32)
         fast.stats.n_processes = min(self.stats.n_processes, 2)
