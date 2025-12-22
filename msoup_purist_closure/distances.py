@@ -5,6 +5,7 @@ import numpy as np
 from scipy import integrate
 
 from .config import DEFAULT_H_EARLY, DEFAULT_OMEGA_L0, DEFAULT_OMEGA_M0
+from .constants import SPEED_OF_LIGHT_KM_S
 from .model import h_eff, leak_fraction
 
 
@@ -14,7 +15,7 @@ def comoving_distance(
     h_early: float = DEFAULT_H_EARLY,
     omega_m0: float = DEFAULT_OMEGA_M0,
     omega_L0: float = DEFAULT_OMEGA_L0,
-    c_km_s: float = 299792.458,
+    c_km_s: float = SPEED_OF_LIGHT_KM_S,
     num_points: int | None = None,
 ) -> np.ndarray:
     """Compute comoving distance via quadrature."""

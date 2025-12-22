@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .observables import bao_predict
+from .observables import bao_predict, canonicalize_bao_observable
 
 
 @dataclass
@@ -51,6 +51,7 @@ def compute_bao_pulls(
     rd_mpc: float,
     cosmo_kwargs: Dict,
     sanity_check: bool = False,
+    rd_fid_conventions: dict | None = None,
 ) -> Tuple[List[BaoRowResult], Dict[str, Tuple[float, int]], float, int]:
     """
     Compute BAO pulls for all rows in a DataFrame.
@@ -72,13 +73,26 @@ def compute_bao_pulls(
 
     for _, row in df.iterrows():
         z = row['z']
-        obs = row['observable']
+        obs = canonicalize_bao_observable(row['observable'])
         val = row['value']
         sig = row['sigma']
         tracer = row.get('tracer', '')
         paper_tag = row.get('paper_tag', '')
+        rd_fid_mpc = row.get('rd_fid_mpc')
+        rd_scaling = row.get('rd_scaling')
 
-        pred = bao_predict(z, obs, delta_m, rd_mpc, sanity_check=sanity_check, **cosmo_kwargs)
+        pred = bao_predict(
+            z,
+            obs,
+            delta_m,
+            rd_mpc,
+            sanity_check=sanity_check,
+            rd_fid_mpc=rd_fid_mpc,
+            rd_scaling=rd_scaling,
+            rd_fid_conventions=rd_fid_conventions,
+            paper_tag=paper_tag,
+            **cosmo_kwargs,
+        )
         resid = val - pred
         pull = resid / sig
         chi2_i = pull ** 2
@@ -94,15 +108,7 @@ def compute_bao_pulls(
         total_dof += 1
 
         # Accumulate by observable type
-        obs_upper = obs.upper()
-        if 'DV' in obs_upper:
-            key = 'DV/rd'
-        elif 'DM' in obs_upper and 'DH' not in obs_upper:
-            key = 'DM/rd'
-        elif 'DH' in obs_upper:
-            key = 'DH/rd'
-        else:
-            continue
+        key = canonicalize_bao_observable(obs)
         old_chi2, old_dof = chi2_by_obs[key]
         chi2_by_obs[key] = (old_chi2 + chi2_i, old_dof + 1)
 
@@ -120,6 +126,7 @@ def run_bao_sanity_cases(
     delta_m_star: float,
     rd_mpc: float,
     cosmo_kwargs: Dict,
+    rd_fid_conventions: dict | None = None,
 ) -> Dict[str, BaoCaseResult]:
     """
     Run BAO sanity diagnostics for three cases:
@@ -148,7 +155,7 @@ def run_bao_sanity_cases(
         sanity_check = (case_name == "LCDM_BASELINE")
 
         rows, chi2_by_obs, total_chi2, total_dof = compute_bao_pulls(
-            df, delta_m, rd_mpc, cosmo_kwargs, sanity_check=sanity_check
+            df, delta_m, rd_mpc, cosmo_kwargs, sanity_check=sanity_check, rd_fid_conventions=rd_fid_conventions
         )
 
         chi2_dof = total_chi2 / total_dof if total_dof > 0 else np.nan

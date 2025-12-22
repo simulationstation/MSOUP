@@ -10,6 +10,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .bao_benchmark import run_bao_benchmark
 from .config import MsoupConfig, ProbeConfig, load_config
 from .distances import angular_diameter_distance, comoving_distance, h_eff_ratio, luminosity_distance
 from .fit import fit_delta_m
@@ -55,11 +56,16 @@ def check_memory_guard() -> bool:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Purist MSOUP closure runner")
-    parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--config", required=False, help="Path to YAML config")
     parser.add_argument("--mode", choices=["kernel", "distance", "both"], default="kernel")
     parser.add_argument("--bao-sanity", action="store_true",
                         help="Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK")
-    return parser.parse_args(argv)
+    parser.add_argument("--bao-benchmark", action="store_true",
+                        help="Run embedded BAO benchmark table without loading external data")
+    args = parser.parse_args(argv)
+    if not args.bao_benchmark and args.config is None:
+        parser.error("--config is required unless --bao-benchmark is specified")
+    return args
 
 
 def run_kernel_mode(cfg: MsoupConfig, output_dir: pathlib.Path) -> Dict[str, dict]:
@@ -415,19 +421,27 @@ def run_distance_mode(
             pred_values_list = []
             obs_types_list = []
             n_dv, n_dm, n_dh = 0, 0, 0
+            rd_fid_conventions: dict | None = {}
 
             for _, row in df.iterrows():
                 obs_type = row['observable']
                 z = row['z']
                 val = row['value']
                 sig = row['sigma']
+                rd_fid_mpc = row.get('rd_fid_mpc')
+                rd_scaling = row.get('rd_scaling')
 
-                try:
-                    pred = bao_predict(z, obs_type, delta_m_star, rd, **cosmo_kwargs)
-                except ValueError as e:
-                    # Unknown observable type - skip with warning
-                    print(f"Warning: {e}")
-                    continue
+                pred = bao_predict(
+                    z,
+                    obs_type,
+                    delta_m_star,
+                    rd,
+                    rd_fid_mpc=rd_fid_mpc,
+                    rd_scaling=rd_scaling,
+                    rd_fid_conventions=rd_fid_conventions,
+                    paper_tag=row.get('paper_tag'),
+                    **cosmo_kwargs,
+                )
 
                 z_obs_list.append(z)
                 obs_values_list.append(val)
@@ -581,7 +595,7 @@ def run_bao_sanity_diagnostics(
 
     # Run three-case comparison
     print(f"Running sanity cases with delta_m_star={delta_m_star:.4f}, rd={rd:.2f} Mpc")
-    results = run_bao_sanity_cases(df, delta_m_star, rd, cosmo_kwargs)
+    results = run_bao_sanity_cases(df, delta_m_star, rd, cosmo_kwargs, rd_fid_conventions={})
 
     # Print summary to console
     print("\nBAO Sanity Summary:")
@@ -618,6 +632,16 @@ def run_bao_sanity_diagnostics(
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.bao_benchmark:
+        results_root = pathlib.Path("results/msoup_purist_closure")
+        if args.config:
+            cfg_for_paths = load_config(args.config)
+            results_root = cfg_for_paths.results_dir
+        df, output_dir = run_bao_benchmark(results_root)
+        print(df.to_string(index=False, float_format="%.4f"))
+        print(f"BAO benchmark written to {output_dir}")
+        return 0
+
     cfg = load_config(args.config)
     output_dir = cfg.results_dir / cfg.timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
