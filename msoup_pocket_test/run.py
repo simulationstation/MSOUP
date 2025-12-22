@@ -528,7 +528,7 @@ def main() -> None:
     # Adjust config based on mode
     if args.mode == "sanity":
         print("=== SANITY MODE: Minimal resampling, full coverage ===")
-        cfg.stats.null_realizations = 32  # Minimal but sufficient for validation
+        # null_realizations already set from config's resamples_sanity_default
         cfg.geometry.n_shuffles = 50
     elif args.mode == "full":
         print("=== FULL MODE: Full empirical p-values ===")

@@ -50,7 +50,7 @@ stats:
 resources:
   max_workers: 1
   chunk_days: 7
-  resamples_sanity_default: 128
+  resamples_sanity_default: 256
   resamples_full_default: 512
   max_rss_gb: 8.0
   pair_mode: binned
