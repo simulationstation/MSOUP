@@ -19,12 +19,25 @@ def detrend_series(series: pd.Series, config: PreprocessConfig) -> pd.Series:
     if series.empty:
         return series
 
+    # Handle NaN/Inf values - replace with interpolated values for detrending
+    clean_series = series.replace([np.inf, -np.inf], np.nan)
+    valid_mask = clean_series.notna()
+
+    if not valid_mask.any():
+        return pd.Series(np.nan, index=series.index)
+
+    # Interpolate to fill gaps for detrending (preserves index)
+    interpolated = clean_series.interpolate(method='linear', limit_direction='both')
+
     window = max(1, int(config.detrend_window_minutes * 60 / config.cadence_seconds))
-    median = series.rolling(window=window, center=True, min_periods=1).median()
-    residual = series - median
+    median = interpolated.rolling(window=window, center=True, min_periods=1).median()
+    residual = interpolated - median
 
     # High-pass using SciPy detrend to remove slow drifts
     residual = pd.Series(signal.detrend(residual.to_numpy()), index=series.index)
+
+    # Restore NaN at originally invalid positions
+    residual[~valid_mask] = np.nan
     return residual
 
 

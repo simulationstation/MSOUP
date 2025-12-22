@@ -79,8 +79,13 @@ def evaluate_geometry(
         )
 
     # Use first arrival per sensor
+    # Normalize timestamps to UTC for consistent comparison
+    df = df.copy()
+    df["peak_time"] = pd.to_datetime(df["peak_time"], utc=True)
     first_hits = df.sort_values("peak_time").groupby("sensor").head(1)
-    sensor_positions = positions.set_index("satellite").reindex(first_hits["sensor"])
+    # Use first position per satellite (positions may have multiple epochs)
+    unique_positions = positions.drop_duplicates(subset="satellite").set_index("satellite")
+    sensor_positions = unique_positions.reindex(first_hits["sensor"])
     valid = sensor_positions.dropna()
     first_hits = first_hits.set_index("sensor").loc[valid.index].reset_index()
 

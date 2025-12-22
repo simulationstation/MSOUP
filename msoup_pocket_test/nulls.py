@@ -56,9 +56,10 @@ def window_conditioned_resample(
             in_window = group[(group["peak_time"] >= win["start"]) & (group["peak_time"] <= win["end"])]
             if in_window.empty:
                 continue
-            times = in_window["peak_time"].sort_values()
+            times = pd.to_datetime(in_window["peak_time"]).sort_values()
             # Convert to seconds since window start
-            offsets = (times - win["start"]).dt.total_seconds().to_numpy()
+            win_start = pd.to_datetime(win["start"])
+            offsets = (times - win_start).dt.total_seconds().to_numpy()
             n = len(offsets)
             min_offset = offsets.min()
             max_offset = offsets.max()
@@ -86,7 +87,7 @@ def window_conditioned_resample(
                     min_offset,
                     min_offset + duration,
                 )
-            new_times = win["start"] + pd.to_timedelta(new_offsets, unit="s")
+            new_times = win_start + pd.to_timedelta(new_offsets, unit="s")
             sample = in_window.copy()
             sample.loc[:, "peak_time"] = new_times.to_numpy()
             resampled_rows.append(sample)

@@ -68,7 +68,8 @@ def _pairwise_clustering(df: pd.DataFrame, neighbor_time_s: float, neighbor_angl
         return np.nan
 
     # Convert times to seconds (float array for KDTree)
-    times = pd.to_datetime(df["peak_time"]).astype("int64") / 1e9
+    # Handle both tz-aware and tz-naive datetimes
+    times = pd.to_datetime(df["peak_time"], utc=True).astype("int64") / 1e9
     times_arr = times.to_numpy().reshape(-1, 1)
 
     # Build KDTree on times - O(n log n)
