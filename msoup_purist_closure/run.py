@@ -14,8 +14,8 @@ from .config import MsoupConfig, ProbeConfig, load_config
 from .distances import angular_diameter_distance, comoving_distance, h_eff_ratio, luminosity_distance
 from .fit import fit_delta_m
 from .kernels import kernel_weights, load_probe_csv
-from .observables import bao_dv, distance_modulus, lens_time_delay_scaling
-from .plots import plot_af, plot_distance_mode, plot_hinf_curves, plot_kernel_histograms
+from .observables import bao_dv, bao_dm, bao_dh, bao_predict, distance_modulus, lens_time_delay_scaling
+from .plots import plot_af, plot_distance_mode, plot_hinf_curves, plot_kernel_histograms, plot_bao_fit_multi
 from .report import write_report
 from .residuals import (
     ProbeResidualResult,
@@ -377,7 +377,7 @@ def run_distance_mode(
             )
 
         elif probe_type == "bao":
-            # Load BAO data
+            # Load BAO data - requires 'value' column for chi-square computation
             df, status = load_bao_observed_data(probe)
             if df is None:
                 result = ProbeResidualResult(
@@ -387,15 +387,24 @@ def run_distance_mode(
                 distance_results["probes"][probe.name] = asdict(result)
                 continue
 
-            # BAO supports DV/rd and DM/rd (comoving distance/rd)
-            # Combine them, prioritizing DM/rd at higher z where more data exists
-            rd = 147.09  # Planck 2018 sound horizon [Mpc]
+            # Use rd from config (fixed, not fitted)
+            rd = cfg.distance.rd_mpc
 
+            # Cosmology kwargs for bao_predict
+            cosmo_kwargs = {
+                "h_early": cfg.h_early,
+                "omega_m0": cfg.omega_m0,
+                "omega_L0": cfg.omega_L0,
+                "c_km_s": cfg.distance.speed_of_light,
+            }
+
+            # Process ALL BAO rows using bao_predict (DV/rd, DM/rd, DH/rd)
             z_obs_list = []
             obs_values_list = []
             sigma_list = []
             pred_values_list = []
-            obs_types = []
+            obs_types_list = []
+            n_dv, n_dm, n_dh = 0, 0, 0
 
             for _, row in df.iterrows():
                 obs_type = row['observable']
@@ -403,34 +412,32 @@ def run_distance_mode(
                 val = row['value']
                 sig = row['sigma']
 
-                if 'DV' in obs_type.upper():
-                    # DV/rd: volumetric distance
-                    pred = compute_bao_dv_rd(z, delta_m_star, cfg, rd)
-                    z_obs_list.append(z)
-                    obs_values_list.append(val)
-                    sigma_list.append(sig)
-                    pred_values_list.append(pred)
-                    obs_types.append('DV/rd')
-                elif 'DM' in obs_type.upper() and 'DH' not in obs_type.upper():
-                    # DM/rd: comoving distance (angular diameter distance * (1+z))
-                    D_A = angular_diameter_distance(
-                        np.array([z]), delta_m_star,
-                        h_early=cfg.h_early, omega_m0=cfg.omega_m0, omega_L0=cfg.omega_L0,
-                        c_km_s=cfg.distance.speed_of_light
-                    )[0]
-                    D_M = D_A * (1 + z)  # comoving distance
-                    pred = D_M / rd
-                    z_obs_list.append(z)
-                    obs_values_list.append(val)
-                    sigma_list.append(sig)
-                    pred_values_list.append(pred)
-                    obs_types.append('DM/rd')
-                # Skip DH/rd (Hubble distance) for now - requires different prediction
+                try:
+                    pred = bao_predict(z, obs_type, delta_m_star, rd, **cosmo_kwargs)
+                except ValueError as e:
+                    # Unknown observable type - skip with warning
+                    print(f"Warning: {e}")
+                    continue
+
+                z_obs_list.append(z)
+                obs_values_list.append(val)
+                sigma_list.append(sig)
+                pred_values_list.append(pred)
+                obs_types_list.append(obs_type)
+
+                # Count by type
+                obs_upper = obs_type.upper()
+                if 'DV' in obs_upper:
+                    n_dv += 1
+                elif 'DM' in obs_upper and 'DH' not in obs_upper:
+                    n_dm += 1
+                elif 'DH' in obs_upper:
+                    n_dh += 1
 
             if len(z_obs_list) == 0:
                 result = ProbeResidualResult(
                     status="NOT_TESTABLE",
-                    reason="no supported observable (DV/rd or DM/rd)",
+                    reason="no supported observable (DV/rd, DM/rd, or DH/rd)",
                 )
                 distance_results["probes"][probe.name] = asdict(result)
                 continue
@@ -439,9 +446,13 @@ def run_distance_mode(
             obs_values = np.array(obs_values_list)
             sigma = np.array(sigma_list)
             pred_values = np.array(pred_values_list)
-            observable = f"DV/rd+DM/rd ({len(z_obs_list)} pts)"
 
-            result = compute_bao_residuals(z_obs, obs_values, pred_values, sigma, observable)
+            # Compute chi-square
+            result = compute_bao_residuals(z_obs, obs_values, pred_values, sigma, "BAO")
+
+            # Add observable breakdown to result
+            obs_breakdown = f"DV/rd:{n_dv}, DM/rd:{n_dm}, DH/rd:{n_dh}"
+            result.obs_column = obs_breakdown
 
             if result.status == "OK" and np.isfinite(result.chi2):
                 chi2_total += result.chi2
@@ -449,9 +460,14 @@ def run_distance_mode(
 
             distance_results["probes"][probe.name] = asdict(result)
 
-            # Plot with data points
-            plot_bao_fit(
-                z_grid, dv_grid / rd, z_obs, obs_values, sigma,
+            # Print BAO summary to console
+            print(f"BAO {probe.name}: {len(z_obs_list)} rows ({obs_breakdown}), "
+                  f"chi2={result.chi2:.2f}, dof={result.dof}, chi2/dof={result.chi2_dof:.3f}")
+
+            # Plot with data points - grouped by observable type
+            plot_bao_fit_multi(
+                z_grid, delta_m_star, rd, cfg,
+                z_obs_list, obs_values_list, sigma_list, obs_types_list,
                 probe.name, output_dir
             )
 

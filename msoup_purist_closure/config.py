@@ -50,6 +50,8 @@ class DistanceConfig:
     num_z_samples: int = 512
     speed_of_light: float = 299792.458  # km/s
     nuisance_M: float = 0.0
+    # BAO sound horizon at drag epoch in Mpc (Planck 2018 fiducial, fixed, not fitted)
+    rd_mpc: float = 147.09
 
 
 @dataclass

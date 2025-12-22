@@ -150,6 +150,94 @@ def plot_bao_fit(
     plt.close(fig)
 
 
+def plot_bao_fit_multi(
+    z_grid: np.ndarray,
+    delta_m: float,
+    rd_mpc: float,
+    cfg,
+    z_obs_list: list,
+    obs_values_list: list,
+    sigma_list: list,
+    obs_types_list: list,
+    probe_name: str,
+    output_dir: pathlib.Path,
+):
+    """
+    Plot BAO observables: theory curves for DV/rd, DM/rd, DH/rd with data points.
+
+    Creates a multi-panel figure showing all observable types.
+    """
+    from .observables import bao_dv, bao_dm, bao_dh
+
+    # Group data by observable type
+    data_by_type = {"DV/rd": [], "DM/rd": [], "DH/rd": []}
+    for z, val, sig, obs_type in zip(z_obs_list, obs_values_list, sigma_list, obs_types_list):
+        obs_upper = obs_type.upper()
+        if "DV" in obs_upper:
+            data_by_type["DV/rd"].append((z, val, sig))
+        elif "DM" in obs_upper and "DH" not in obs_upper:
+            data_by_type["DM/rd"].append((z, val, sig))
+        elif "DH" in obs_upper:
+            data_by_type["DH/rd"].append((z, val, sig))
+
+    # Cosmology kwargs
+    cosmo_kwargs = {
+        "h_early": cfg.h_early,
+        "omega_m0": cfg.omega_m0,
+        "omega_L0": cfg.omega_L0,
+        "c_km_s": cfg.distance.speed_of_light,
+    }
+
+    # Compute theory curves
+    dv_theory = bao_dv(z_grid, delta_m=delta_m, **cosmo_kwargs) / rd_mpc
+    dm_theory = bao_dm(z_grid, delta_m=delta_m, **cosmo_kwargs) / rd_mpc
+    dh_theory = bao_dh(z_grid, delta_m=delta_m, **cosmo_kwargs) / rd_mpc
+
+    # Determine which panels to show (only those with data)
+    active_types = [t for t in ["DV/rd", "DM/rd", "DH/rd"] if len(data_by_type[t]) > 0]
+    n_panels = len(active_types)
+
+    if n_panels == 0:
+        return  # Nothing to plot
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5), squeeze=False)
+    axes = axes.flatten()
+
+    colors = {"DV/rd": "blue", "DM/rd": "green", "DH/rd": "purple"}
+    theories = {"DV/rd": dv_theory, "DM/rd": dm_theory, "DH/rd": dh_theory}
+
+    for i, obs_type in enumerate(active_types):
+        ax = axes[i]
+        theory = theories[obs_type]
+        data = data_by_type[obs_type]
+
+        # Theory curve
+        ax.plot(z_grid, theory, "-", color=colors[obs_type], lw=1.5, label="Model")
+
+        # Data points
+        z_data = [d[0] for d in data]
+        val_data = [d[1] for d in data]
+        sig_data = [d[2] for d in data]
+
+        ax.errorbar(
+            z_data, val_data, yerr=sig_data,
+            fmt="o", color="red", markersize=6,
+            elinewidth=1.5, capsize=3, label=f"Data (n={len(data)})"
+        )
+
+        ax.set_xlabel("Redshift z")
+        ax.set_ylabel(obs_type)
+        ax.set_title(f"{obs_type}")
+        ax.legend(loc="best")
+
+    fig.suptitle(f"BAO {probe_name}", fontsize=12)
+    fig.tight_layout()
+
+    output = output_dir / f"bao_{probe_name}_fit.png"
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+
+
 def plot_td_fit(
     z_lens: np.ndarray,
     ddt_obs: np.ndarray,
