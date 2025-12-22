@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from .constants import SPEED_OF_LIGHT_KM_S
 from .distances import angular_diameter_distance, comoving_distance, luminosity_distance
+from .config import DEFAULT_H_EARLY, DEFAULT_OMEGA_L0, DEFAULT_OMEGA_M0
 
 
 def distance_modulus(z: np.ndarray, delta_m: float, nuisance_M: float = 0.0, **kwargs) -> np.ndarray:
@@ -29,7 +31,7 @@ def bao_dv(z: np.ndarray, delta_m: float, **kwargs) -> np.ndarray:
         omega_m0=kwargs.get("omega_m0"),
         omega_L0=kwargs.get("omega_L0"),
     )
-    c_km_s = kwargs.get("c_km_s", 299792.458)
+    c_km_s = kwargs.get("c_km_s", SPEED_OF_LIGHT_KM_S)
     dv = ((1 + z) ** 2 * da ** 2 * (c_km_s * z / h_eff_vals)) ** (1.0 / 3.0)
     return dv
 
@@ -62,12 +64,82 @@ def bao_dh(z: np.ndarray, delta_m: float, **kwargs) -> np.ndarray:
         omega_m0=kwargs.get("omega_m0"),
         omega_L0=kwargs.get("omega_L0"),
     )
-    c_km_s = kwargs.get("c_km_s", 299792.458)
+    c_km_s = kwargs.get("c_km_s", SPEED_OF_LIGHT_KM_S)
     return c_km_s / h_eff_vals
 
 
-def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float,
-                sanity_check: bool = False, **kwargs) -> float:
+def canonicalize_bao_observable(observable: str) -> str:
+    """Normalize BAO observable strings and validate dimensionless ratios."""
+    obs_upper = observable.upper().replace(" ", "")
+    if obs_upper in ("DV/RD", "DV_RD", "DVRD"):
+        return "DV/rd"
+    if obs_upper in ("DM/RD", "DM_RD", "DMRD"):
+        return "DM/rd"
+    if obs_upper in ("DH/RD", "DH_RD", "DHRD"):
+        return "DH/rd"
+    raise ValueError(
+        f"Unsupported BAO observable '{observable}'. Expected DV/rd, DM/rd, or DH/rd."
+    )
+
+
+def resolve_rd_fid_scaling(
+    observable: str,
+    rd_mpc: float,
+    rd_fid_mpc: float | None = None,
+    rd_scaling: str | None = None,
+    paper_tag: str | None = None,
+    rd_fid_conventions: dict | None = None,
+) -> tuple[float, str | None]:
+    """
+    Determine multiplicative factor to map a predicted DV/rd, DM/rd, or DH/rd
+    to the convention used in a publication when an rd_fid is provided.
+
+    Args:
+        observable: Canonical observable name (DV/rd, DM/rd, DH/rd)
+        rd_mpc: Sound horizon used for predictions
+        rd_fid_mpc: Optional fiducial sound horizon from publication
+        rd_scaling: Optional explicit hint, one of:
+            - "multiply_by_rd_over_rdfid": predicted*(rd/rd_fid)
+            - "multiply_by_rdfid_over_rd": predicted*(rd_fid/rd)
+        paper_tag: Optional publication tag for lookup
+        rd_fid_conventions: Optional mapping {paper_tag: rd_scaling}
+
+    Returns:
+        (scaling_factor, applied_hint or None)
+    """
+    if rd_fid_mpc is None:
+        return 1.0, None
+
+    hint = rd_scaling
+    if hint is None and rd_fid_conventions and paper_tag:
+        hint = rd_fid_conventions.get(paper_tag)
+
+    if hint is None:
+        return 1.0, None
+
+    hint_lower = hint.lower()
+    if hint_lower == "multiply_by_rd_over_rdfid":
+        return rd_mpc / rd_fid_mpc, hint_lower
+    if hint_lower == "multiply_by_rdfid_over_rd":
+        return rd_fid_mpc / rd_mpc, hint_lower
+
+    raise ValueError(
+        f"Unknown rd_scaling hint '{hint}'. Use multiply_by_rd_over_rdfid or multiply_by_rdfid_over_rd."
+    )
+
+
+def bao_predict(
+    z: float,
+    observable: str,
+    delta_m: float,
+    rd_mpc: float,
+    sanity_check: bool = False,
+    rd_fid_mpc: float | None = None,
+    rd_scaling: str | None = None,
+    rd_fid_conventions: dict | None = None,
+    paper_tag: str | None = None,
+    **kwargs,
+) -> float:
     """
     Compute BAO observable prediction for a single redshift.
 
@@ -87,19 +159,18 @@ def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float,
     """
     from .model import h_eff
 
-    obs_upper = observable.upper().replace(" ", "")
+    canonical_obs = canonicalize_bao_observable(observable)
     z_arr = np.array([z])
-    c_km_s = kwargs.get("c_km_s", 299792.458)
+    c_km_s = kwargs.get("c_km_s", SPEED_OF_LIGHT_KM_S)
 
     # Compute base quantities
-    da = angular_diameter_distance(z_arr, delta_m=delta_m, **kwargs)[0]
+    h_early = kwargs.get("h_early", DEFAULT_H_EARLY)
+    omega_m0 = kwargs.get("omega_m0", DEFAULT_OMEGA_M0)
+    omega_L0 = kwargs.get("omega_L0", DEFAULT_OMEGA_L0)
+
+    da = angular_diameter_distance(z_arr, delta_m=delta_m, h_early=h_early, omega_m0=omega_m0, omega_L0=omega_L0, c_km_s=c_km_s)[0]
     dm = (1 + z) * da  # D_M = (1+z) * D_A
-    h_z = h_eff(
-        z_arr, delta_m=delta_m,
-        h_early=kwargs.get("h_early"),
-        omega_m0=kwargs.get("omega_m0"),
-        omega_L0=kwargs.get("omega_L0"),
-    )[0]
+    h_z = h_eff(z_arr, delta_m=delta_m, h_early=h_early, omega_m0=omega_m0, omega_L0=omega_L0)[0]
     dh = c_km_s / h_z  # D_H = c / H(z) in Mpc
 
     if sanity_check:
@@ -124,15 +195,22 @@ def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float,
         if rd_mpc <= 0:
             raise ValueError(f"Sanity check failed: rd_mpc = {rd_mpc} <= 0")
 
-    if obs_upper in ("DV/RD", "DV_RD", "DVRD"):
-        dv = bao_dv(z_arr, delta_m=delta_m, **kwargs)[0]
+    if canonical_obs == "DV/rd":
+        dv = bao_dv(z_arr, delta_m=delta_m, h_early=h_early, omega_m0=omega_m0, omega_L0=omega_L0, c_km_s=c_km_s)[0]
         result = dv / rd_mpc
-    elif obs_upper in ("DM/RD", "DM_RD", "DMRD"):
+    elif canonical_obs == "DM/rd":
         result = dm / rd_mpc
-    elif obs_upper in ("DH/RD", "DH_RD", "DHRD"):
+    elif canonical_obs == "DH/rd":
         result = dh / rd_mpc
     else:
         raise ValueError(f"Unknown BAO observable: '{observable}'. Supported: DV/rd, DM/rd, DH/rd")
+
+    scaling, applied_hint = resolve_rd_fid_scaling(
+        canonical_obs, rd_mpc, rd_fid_mpc=rd_fid_mpc,
+        rd_scaling=rd_scaling, paper_tag=paper_tag,
+        rd_fid_conventions=rd_fid_conventions,
+    )
+    result *= scaling
 
     if sanity_check:
         # Final check: result should be positive and finite

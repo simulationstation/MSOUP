@@ -50,8 +50,13 @@ class TestBaoPredict:
 
     def test_bao_predict_unknown_observable_raises(self):
         """Unknown observable type raises ValueError."""
-        with pytest.raises(ValueError, match="Unknown BAO observable"):
+        with pytest.raises(ValueError, match="Unsupported BAO observable"):
             bao_predict(0.5, "unknown_obs", delta_m=0.0, rd_mpc=self.rd_mpc, **self.cosmo_kwargs)
+
+    def test_bao_predict_missing_rd_in_name_raises(self):
+        """Observable missing /rd should raise validation error."""
+        with pytest.raises(ValueError, match="Unsupported BAO observable"):
+            bao_predict(0.5, "DM", delta_m=0.0, rd_mpc=self.rd_mpc, **self.cosmo_kwargs)
 
     def test_bao_predict_all_observables_at_multiple_redshifts(self):
         """All observables return finite values at multiple redshifts."""
