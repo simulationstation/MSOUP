@@ -134,6 +134,7 @@ def generate_report(
     run_label: str,
     config_path: Optional[Path],
     counts_coverage: Optional[Dict[str, Any]] = None,
+    resources: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Write markdown report with kill conditions."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +206,18 @@ def generate_report(
         f"- **Clustering p-value (one-sided):** {stats.p_clustering:.4f}",
         f"- **Clustering p-value (two-sided):** {getattr(stats, 'p_clustering_two_sided', math.nan):.4f}",
         f"- **Number of resamples:** {stats.n_resamples}",
+        f"- **P-value resolution:** {stats.pvalue_resolution:.4f}",
+        "",
+        "---",
+        "",
+        "## Resources",
+        "",
+        f"- **Peak RSS (GB):** {stats.peak_rss_gb:.3f}",
+        f"- **Max RSS limit (GB):** {resources.get('max_rss_gb') if resources else 'n/a'}",
+        f"- **Max workers:** {resources.get('max_workers') if resources else 'n/a'}",
+        f"- **Chunk days:** {resources.get('chunk_days') if resources else 'n/a'}",
+        f"- **Pair mode:** {resources.get('pair_mode') if resources else 'n/a'}",
+        f"- **Time bin (s):** {resources.get('time_bin_seconds') if resources else 'n/a'}",
         "",
         "---",
         "",

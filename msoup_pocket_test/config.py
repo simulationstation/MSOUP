@@ -16,8 +16,6 @@ from typing import Any, Dict, Optional
 import yaml
 
 from .nulls import NullType
-
-
 @dataclass
 class DataConfig:
     """Paths to GNSS and magnetometer products."""
@@ -26,6 +24,7 @@ class DataConfig:
     sp3_glob: str = "data/igs/sp3/*.sp3"
     magnetometer_glob: str = "data/magnetometer/*.csv"
     chunk_hours: float = 6.0
+    chunk_days: float = 7.0
     cache_dir: str = "results/cache"
     # Memory-safety limits: 0 means no limit
     max_clk_files: int = 0
@@ -73,14 +72,35 @@ class StatsConfig:
     """Statistical settings for nulls and summary statistics."""
 
     null_realizations: int = 256
+    resamples_sanity_default: int = 128
+    resamples_full_default: int = 512
     block_length: int = 128
     random_seed: int = 13
-    n_processes: int = 4
+    n_processes: int = 1
     enforce_determinism: bool = True
     allow_time_shift_null: bool = False
     max_empirical_pvalue: float = 1.0
     null_type: NullType = NullType.BLOCK_BOOTSTRAP
     robustness_null_variants: Optional[list] = None
+    pair_mode: str = "binned"
+    time_bin_seconds: int = 60
+    max_rss_gb: float = 9.0
+    max_candidates_in_memory: int = 750000
+    max_workers: int = 1
+
+
+@dataclass
+class ResourceConfig:
+    """Execution safety settings."""
+
+    max_workers: int = 1
+    chunk_days: float = 7.0
+    resamples_sanity_default: int = 128
+    resamples_full_default: int = 512
+    max_rss_gb: float = 9.0
+    pair_mode: str = "binned"
+    time_bin_seconds: int = 60
+    max_candidates_in_memory: int = 750000
 
 
 @dataclass
@@ -122,6 +142,7 @@ class PocketConfig:
     candidates: CandidateConfig = field(default_factory=CandidateConfig)
     windows: WindowConfig = field(default_factory=WindowConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
+    resources: ResourceConfig = field(default_factory=ResourceConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
@@ -147,12 +168,33 @@ class PocketConfig:
                 return subcls(**payload)
             return subcls()
 
+        resources = build(ResourceConfig, "resources")
+        stats = build(StatsConfig, "stats")
+        stats.pair_mode = getattr(stats, "pair_mode", resources.pair_mode)
+        stats.time_bin_seconds = getattr(stats, "time_bin_seconds", resources.time_bin_seconds)
+        stats.max_rss_gb = getattr(stats, "max_rss_gb", resources.max_rss_gb)
+        stats.max_candidates_in_memory = getattr(
+            stats, "max_candidates_in_memory", resources.max_candidates_in_memory
+        )
+        stats.resamples_sanity_default = getattr(
+            stats, "resamples_sanity_default", resources.resamples_sanity_default
+        )
+        stats.resamples_full_default = getattr(
+            stats, "resamples_full_default", resources.resamples_full_default
+        )
+        stats.n_processes = getattr(stats, "n_processes", resources.max_workers)
+
+        data_cfg = build(DataConfig, "data")
+        if hasattr(data_cfg, "chunk_days"):
+            data_cfg.chunk_hours = data_cfg.chunk_days * 24
+
         return cls(
-            data=build(DataConfig, "data"),
+            data=data_cfg,
             preprocess=build(PreprocessConfig, "preprocess"),
             candidates=build(CandidateConfig, "candidates"),
             windows=build(WindowConfig, "windows"),
-            stats=build(StatsConfig, "stats"),
+            stats=stats,
+            resources=resources,
             geometry=build(GeometryConfig, "geometry"),
             output=build(OutputConfig, "output"),
             robustness=build(RobustnessConfig, "robustness"),
@@ -171,6 +213,7 @@ class PocketConfig:
             "candidates": vars(self.candidates),
             "windows": vars(self.windows),
             "stats": stats_dict,
+            "resources": vars(self.resources),
             "geometry": vars(self.geometry),
             "output": vars(self.output),
             "robustness": vars(self.robustness),
@@ -202,6 +245,10 @@ class PocketConfig:
         fast.stats.null_realizations = min(self.stats.null_realizations, 32)
         fast.stats.block_length = min(self.stats.block_length, 32)
         fast.stats.n_processes = min(self.stats.n_processes, 2)
+        fast.resources.max_workers = min(self.resources.max_workers, 1)
+        fast.stats.null_realizations = min(
+            self.resources.resamples_sanity_default, self.stats.null_realizations
+        )
         fast.run_label = f"{self.run_label}_fast"
         return fast
 

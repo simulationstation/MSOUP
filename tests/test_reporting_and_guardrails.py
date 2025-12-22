@@ -51,15 +51,30 @@ def test_nan_raises_full_mode(monkeypatch):
 
 def test_counts_section_present(tmp_path: Path):
     stats = GlobalStats(
-        fano_obs=1.0, fano_null_mean=1.0, fano_null_std=0.1, fano_z=0.0, p_fano=0.5,
-        c_obs=0.2, c_null_mean=0.1, c_null_std=0.05, c_excess=0.1, c_excess_std=0.05,
-        c_z=2.0, p_clustering=0.01, p_clustering_two_sided=0.02, n_resamples=10, sensor_weights={"A": 1.0},
+        fano_obs=1.0,
+        fano_null_mean=1.0,
+        fano_null_std=0.1,
+        fano_z=0.0,
+        p_fano=0.5,
+        c_obs=0.2,
+        c_null_mean=0.1,
+        c_null_std=0.05,
+        c_excess=0.1,
+        c_excess_std=0.05,
+        c_z=2.0,
+        p_clustering=0.01,
+        p_clustering_two_sided=0.02,
+        n_resamples=10,
+        pvalue_resolution=0.1,
+        sensor_weights={"A": 1.0},
+        peak_rss_gb=0.1,
     )
     geom = GeometryResult(chi2_obs=None, null_chi2s=None, p_value=None, n_events=0, status="NOT_TESTABLE", reason="synthetic", speed_kmps=None, normal=None)
     windows = [Window(sensor="A", start=pd.Timestamp("2024-01-01"), end=pd.Timestamp("2024-01-01T00:10:00"), cadence_seconds=30, quality_score=1.0)]
     candidates = pd.DataFrame({"sensor": ["A"], "sigma": [4.0], "window_index": [0]})
     counts = compute_counts_coverage({"A": pd.DataFrame({"time": [pd.Timestamp("2024-01-01")], "sensor": ["A"], "value": [1.0]})}, windows, candidates, neighbor_time=30.0, neighbor_angle=25.0, thresholds=[2.0, 3.0, 4.0], geom=geom)
-    report = generate_report(tmp_path, stats, geom, cross_modality_ok=False, run_label="test", config_path=None, counts_coverage=counts)
+    resources = {"peak_rss_gb": 0.1, "max_workers": 1, "chunk_days": 7, "pair_mode": "binned", "time_bin_seconds": 60, "max_rss_gb": 9.0}
+    report = generate_report(tmp_path, stats, geom, cross_modality_ok=False, run_label="test", config_path=None, counts_coverage=counts, resources=resources)
     content = Path(report).read_text()
     assert "Counts & Coverage" in content
     assert "Threshold counts" in content
@@ -67,9 +82,23 @@ def test_counts_section_present(tmp_path: Path):
 
 def test_no_nan_in_summary(tmp_path: Path):
     stats = GlobalStats(
-        fano_obs=1.0, fano_null_mean=1.0, fano_null_std=0.1, fano_z=0.0, p_fano=0.5,
-        c_obs=0.2, c_null_mean=0.1, c_null_std=0.05, c_excess=0.1, c_excess_std=0.05,
-        c_z=2.0, p_clustering=0.01, p_clustering_two_sided=0.02, n_resamples=10, sensor_weights={"A": 1.0},
+        fano_obs=1.0,
+        fano_null_mean=1.0,
+        fano_null_std=0.1,
+        fano_z=0.0,
+        p_fano=0.5,
+        c_obs=0.2,
+        c_null_mean=0.1,
+        c_null_std=0.05,
+        c_excess=0.1,
+        c_excess_std=0.05,
+        c_z=2.0,
+        p_clustering=0.01,
+        p_clustering_two_sided=0.02,
+        n_resamples=10,
+        pvalue_resolution=0.1,
+        sensor_weights={"A": 1.0},
+        peak_rss_gb=0.1,
     )
     geom = GeometryResult(chi2_obs=1.0, null_chi2s=np.array([1.0, 2.0]), p_value=0.5, n_events=5, status="COMPLETED", reason=None, speed_kmps=300.0, normal=np.ones(3))
     counts = {
@@ -78,7 +107,7 @@ def test_no_nan_in_summary(tmp_path: Path):
         "pair_statistics": {"n_pairs_total": 0, "n_sensors_with_pairs": 1, "pairs_per_sensor": {"min": 0, "median": 0, "max": 0, "p10": 0, "p50": 0, "p90": 0, "p99": 0}, "neighbor_time_s": 30.0, "neighbor_angle_deg": 25.0},
         "geometry_preconditions": {"n_candidate_events_total": 1, "n_coincidences_used": 1, "n_events_tested_geometry": 5, "reason": None},
     }
-    summary_path = generate_summary_json(tmp_path, stats, geom, counts, run_mode="full")
+    summary_path = generate_summary_json(tmp_path, stats, geom, counts, run_mode="full", resources=None)
     data = json.loads(Path(summary_path).read_text())
     def _walk_numbers(obj):
         if isinstance(obj, dict):
@@ -94,9 +123,23 @@ def test_no_nan_in_summary(tmp_path: Path):
 
 def test_k1_reports_signed_and_two_sided(tmp_path: Path):
     stats = GlobalStats(
-        fano_obs=1.0, fano_null_mean=1.0, fano_null_std=0.1, fano_z=0.0, p_fano=0.5,
-        c_obs=0.2, c_null_mean=0.1, c_null_std=0.05, c_excess=0.1, c_excess_std=0.05,
-        c_z=-2.0, p_clustering=0.8, p_clustering_two_sided=0.05, n_resamples=5, sensor_weights={"A": 1.0},
+        fano_obs=1.0,
+        fano_null_mean=1.0,
+        fano_null_std=0.1,
+        fano_z=0.0,
+        p_fano=0.5,
+        c_obs=0.2,
+        c_null_mean=0.1,
+        c_null_std=0.05,
+        c_excess=0.1,
+        c_excess_std=0.05,
+        c_z=-2.0,
+        p_clustering=0.8,
+        p_clustering_two_sided=0.05,
+        n_resamples=5,
+        pvalue_resolution=0.1,
+        sensor_weights={"A": 1.0},
+        peak_rss_gb=0.1,
     )
     geom = GeometryResult(chi2_obs=None, null_chi2s=None, p_value=None, n_events=0, status="NOT_TESTABLE", reason="synthetic", speed_kmps=None, normal=None)
     counts = {
@@ -105,7 +148,7 @@ def test_k1_reports_signed_and_two_sided(tmp_path: Path):
         "pair_statistics": {"n_pairs_total": 0, "n_sensors_with_pairs": 1, "pairs_per_sensor": {"min": 0, "median": 0, "max": 0, "p10": 0, "p50": 0, "p90": 0, "p99": 0}, "neighbor_time_s": 30.0, "neighbor_angle_deg": 25.0},
         "geometry_preconditions": {"n_candidate_events_total": 1, "n_coincidences_used": 1, "n_events_tested_geometry": 0, "reason": "synthetic"},
     }
-    summary_path = generate_summary_json(tmp_path, stats, geom, counts, run_mode="sanity")
+    summary_path = generate_summary_json(tmp_path, stats, geom, counts, run_mode="sanity", resources=None)
     data = json.loads(Path(summary_path).read_text())
     assert "c_z" in data["statistics"]
     assert "p_clustering_two_sided" in data["statistics"]

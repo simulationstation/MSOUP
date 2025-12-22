@@ -13,6 +13,7 @@ from scipy.spatial import cKDTree
 
 from .config import CandidateConfig, StatsConfig
 from .nulls import iter_null_catalogs
+from .resources import ResourceMonitor
 
 
 @dataclass
@@ -37,7 +38,9 @@ class GlobalStats:
 
     # Metadata
     n_resamples: int
+    pvalue_resolution: float
     sensor_weights: Dict[str, float]
+    peak_rss_gb: float
 
 
 def compute_fano(counts: Iterable[int]) -> float:
@@ -93,15 +96,85 @@ def _pairwise_clustering(df: pd.DataFrame, neighbor_time_s: float, neighbor_angl
     return count / total_pairs
 
 
+def _binned_clustering(
+    df: pd.DataFrame,
+    neighbor_time_s: float,
+    neighbor_angle_deg: float,
+    time_bin_seconds: float,
+) -> float:
+    """Approximate clustering using coarse bins for near O(n) scaling."""
+    if df.empty:
+        return np.nan
+
+    n = len(df)
+    total_pairs = n * (n - 1) // 2
+    if total_pairs == 0:
+        return np.nan
+
+    times = pd.to_datetime(df["peak_time"], utc=True).astype("int64") / 1e9
+    t_bins = np.floor(times / time_bin_seconds).astype(np.int64)
+
+    if neighbor_angle_deg is None or "angle" not in df.columns:
+        counts: Dict[int, int] = {}
+        for t in t_bins:
+            counts[t] = counts.get(t, 0) + 1
+        t_radius = max(0, int(np.ceil(neighbor_time_s / time_bin_seconds)))
+        pair_count = 0.0
+        for t, c in counts.items():
+            pair_count += c * (c - 1) / 2
+            for dt in range(1, t_radius + 1):
+                if t + dt in counts:
+                    pair_count += c * counts[t + dt]
+        return pair_count / total_pairs
+
+    angle_bin_size = max(1.0, neighbor_angle_deg)
+    a_bins = np.floor(df["angle"].to_numpy() / angle_bin_size).astype(np.int64)
+    counts: Dict[Tuple[int, int], int] = {}
+    for t, a in zip(t_bins, a_bins):
+        key = (t, a)
+        counts[key] = counts.get(key, 0) + 1
+
+    t_radius = max(0, int(np.ceil(neighbor_time_s / time_bin_seconds)))
+    a_radius = max(0, int(np.ceil(neighbor_angle_deg / angle_bin_size)))
+    pair_count = 0.0
+    for (t, a), c in counts.items():
+        pair_count += c * (c - 1) / 2
+        for dt in range(0, t_radius + 1):
+            for da in range(-a_radius, a_radius + 1):
+                if dt == 0 and da <= 0:
+                    continue
+                neighbor = (t + dt, a + da)
+                if neighbor in counts:
+                    pair_count += c * counts[neighbor]
+    return pair_count / total_pairs
+
+
 def compute_clustering(
     candidates: pd.DataFrame,
     config: CandidateConfig,
+    pair_mode: str = "binned",
+    time_bin_seconds: float = 60.0,
+    max_candidates_in_memory: int = 750000,
+    unsafe: bool = False,
 ) -> float:
     """Compute observed clustering metric."""
-    return _pairwise_clustering(
+    if len(candidates) > max_candidates_in_memory and pair_mode == "exact" and not unsafe:
+        raise RuntimeError(
+            f"{len(candidates)} candidates exceed exact-pair threshold {max_candidates_in_memory}; "
+            "use binned pair mode or increase the limit with --unsafe."
+        )
+    angle = config.neighbor_angle_degrees if "angle" in candidates else None
+    if pair_mode == "exact":
+        return _pairwise_clustering(
+            candidates,
+            neighbor_time_s=config.neighbor_time_seconds,
+            neighbor_angle_deg=angle,
+        )
+    return _binned_clustering(
         candidates,
         neighbor_time_s=config.neighbor_time_seconds,
-        neighbor_angle_deg=config.neighbor_angle_degrees if "angle" in candidates else None,
+        neighbor_angle_deg=angle,
+        time_bin_seconds=time_bin_seconds,
     )
 
 
@@ -148,7 +221,8 @@ def compute_debiased_stats(
     windows: pd.DataFrame,
     stats_cfg: StatsConfig,
     cand_cfg: CandidateConfig,
-    memory_limit_mb: float = 0,
+    monitor: ResourceMonitor | None = None,
+    unsafe: bool = False,
 ) -> GlobalStats:
     """
     Compute C_excess and Fano with null debiasing.
@@ -161,28 +235,72 @@ def compute_debiased_stats(
     """
     if candidates.empty:
         return GlobalStats(
-            fano_obs=0.0, fano_null_mean=1.0, fano_null_std=0.0, fano_z=0.0, p_fano=1.0,
-            c_obs=0.0, c_null_mean=0.0, c_null_std=0.0, c_excess=0.0, c_excess_std=0.0,
-            c_z=0.0, p_clustering=1.0, p_clustering_two_sided=1.0, n_resamples=0, sensor_weights={},
+            fano_obs=0.0,
+            fano_null_mean=1.0,
+            fano_null_std=0.0,
+            fano_z=0.0,
+            p_fano=1.0,
+            c_obs=0.0,
+            c_null_mean=0.0,
+            c_null_std=0.0,
+            c_excess=0.0,
+            c_excess_std=0.0,
+            c_z=0.0,
+            p_clustering=1.0,
+            p_clustering_two_sided=1.0,
+            n_resamples=0,
+            pvalue_resolution=1.0,
+            sensor_weights={},
+            peak_rss_gb=monitor.peak_rss_gb if monitor else 0.0,
         )
 
     counts = candidates.groupby("sensor").size()
     fano_obs = float(np.nan_to_num(compute_fano(counts), nan=0.0, posinf=0.0, neginf=0.0))
-    c_obs = float(np.nan_to_num(compute_clustering(candidates, cand_cfg), nan=0.0, posinf=0.0, neginf=0.0))
+    c_obs = float(
+        np.nan_to_num(
+            compute_clustering(
+                candidates,
+                cand_cfg,
+                pair_mode=getattr(stats_cfg, "pair_mode", "binned"),
+                time_bin_seconds=getattr(stats_cfg, "time_bin_seconds", 60),
+                max_candidates_in_memory=getattr(stats_cfg, "max_candidates_in_memory", 750000),
+                unsafe=unsafe,
+            ),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+    )
 
-    # Stream null catalogs one at a time (memory efficient)
-    fano_null = []
-    c_null = []
+    if monitor:
+        monitor.check("after_observed")
+
+    class RunningStats:
+        def __init__(self) -> None:
+            self.n = 0
+            self.mean = 0.0
+            self.m2 = 0.0
+
+        def update(self, value: float) -> None:
+            self.n += 1
+            delta = value - self.mean
+            self.mean += delta / self.n
+            delta2 = value - self.mean
+            self.m2 += delta * delta2
+
+        @property
+        def variance(self) -> float:
+            return self.m2 / self.n if self.n > 0 else 0.0
+
+        @property
+        def std(self) -> float:
+            return np.sqrt(self.variance)
+
+    fano_stats = RunningStats()
+    c_stats = RunningStats()
+    fano_null_values: List[float] = []
+    c_null_values: List[float] = []
     n_processed = 0
-
-    # Get initial memory state for monitoring
-    initial_mem = _get_memory_usage_mb()
-    try:
-        import psutil
-        total_mem = psutil.virtual_memory().total / (1024 * 1024)
-        mem_warning_threshold = total_mem * 0.8
-    except ImportError:
-        mem_warning_threshold = float('inf')
 
     null_iter = iter_null_catalogs(
         candidates,
@@ -199,44 +317,46 @@ def compute_debiased_stats(
         if cat.empty:
             continue
 
-        # Compute stats for this single catalog
         null_counts = cat.groupby("sensor").size()
         fano_val = compute_fano(null_counts)
-        clust_val = compute_clustering(cat, cand_cfg)
+        clust_val = compute_clustering(
+            cat,
+            cand_cfg,
+            pair_mode=getattr(stats_cfg, "pair_mode", "binned"),
+            time_bin_seconds=getattr(stats_cfg, "time_bin_seconds", 60),
+            max_candidates_in_memory=getattr(stats_cfg, "max_candidates_in_memory", 750000),
+            unsafe=unsafe,
+        )
         if np.isnan(fano_val) or np.isnan(clust_val):
             continue
-        fano_null.append(fano_val)
-        c_null.append(clust_val)
+        fano_stats.update(fano_val)
+        c_stats.update(clust_val)
+        fano_null_values.append(fano_val)
+        c_null_values.append(clust_val)
         n_processed += 1
 
-        # Memory monitoring (check every 10 iterations to reduce overhead)
-        if n_processed % 10 == 0:
-            current_mem = _get_memory_usage_mb()
-            if memory_limit_mb > 0 and current_mem > memory_limit_mb:
-                print(f"\n⚠️  Memory limit reached ({current_mem:.0f} MB > {memory_limit_mb:.0f} MB)")
-                print(f"    Stopping early after {n_processed} null realizations")
-                break
-            if current_mem > mem_warning_threshold:
-                print(f"\n⚠️  High memory usage: {current_mem:.0f} MB (80% of system RAM)")
-                print(f"    Consider reducing null_realizations or data size")
+        if monitor and n_processed % 5 == 0:
+            monitor.check("null_resample")
 
-    # Fano statistics
-    fano_null_mean = float(np.nanmean(fano_null)) if fano_null else 1.0
-    fano_null_std = float(np.nanstd(fano_null)) if fano_null else 0.0
+    fano_null_mean = fano_stats.mean if fano_stats.n > 0 else 1.0
+    fano_null_std = fano_stats.std if fano_stats.n > 0 else 0.0
     fano_z = (fano_obs - fano_null_mean) / fano_null_std if fano_null_std > 0 else 0.0
-    p_fano = compute_empirical_pvalue(fano_obs, fano_null)
 
-    # Clustering statistics
-    c_null_mean = float(np.nanmean(c_null)) if c_null else 0.0
-    c_null_std = float(np.nanstd(c_null)) if c_null else 0.0
+    more_extreme_fano = sum(1 for v in fano_null_values if v >= fano_obs) if fano_null_values else 0
+    p_fano = float((more_extreme_fano + 1) / (len(fano_null_values) + 1)) if fano_null_values else 1.0
+
+    c_null_mean = c_stats.mean if c_stats.n > 0 else 0.0
+    c_null_std = c_stats.std if c_stats.n > 0 else 0.0
     c_excess = c_obs - c_null_mean
-    c_excess_std = c_null_std  # Uncertainty from null distribution
+    c_excess_std = c_null_std
     c_z = c_excess / c_null_std if c_null_std > 0 else 0.0
-    p_clustering = compute_empirical_pvalue(c_obs, c_null)
-    # two-sided approximation from Z (Gaussian tail)
-    p_clustering_two_sided = float(min(1.0, np.math.erfc(abs(c_z) / np.sqrt(2))))
+    more_extreme = sum(1 for v in c_null_values if v >= c_obs)
+    p_clustering = float((more_extreme + 1) / (len(c_null_values) + 1)) if c_null_values else 1.0
+    two_sided_extreme = sum(1 for v in c_null_values if abs(v - c_null_mean) >= abs(c_obs - c_null_mean))
+    p_clustering_two_sided = (
+        float((two_sided_extreme + 1) / (len(c_null_values) + 1)) if c_null_values else 1.0
+    )
 
-    # Weight sensors inversely by their counts to avoid dominance
     weights = {sensor: 1.0 / (count if count else 1) for sensor, count in counts.items()}
     total = sum(weights.values()) or 1.0
     weights = {k: v / total for k, v in weights.items()}
@@ -256,5 +376,7 @@ def compute_debiased_stats(
         p_clustering=p_clustering,
         p_clustering_two_sided=p_clustering_two_sided,
         n_resamples=n_processed,
+        pvalue_resolution=1.0 / (n_processed + 1) if n_processed else 1.0,
         sensor_weights=weights,
+        peak_rss_gb=monitor.peak_rss_gb if monitor else 0.0,
     )
