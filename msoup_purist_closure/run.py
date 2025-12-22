@@ -15,6 +15,14 @@ from .distances import angular_diameter_distance, comoving_distance, h_eff_ratio
 from .fit import fit_delta_m
 from .kernels import kernel_weights, load_probe_csv
 from .observables import bao_dv, bao_dm, bao_dh, bao_predict, distance_modulus, lens_time_delay_scaling
+from .bao_diagnostics import (
+    run_bao_sanity_cases,
+    write_bao_audit_csv,
+    format_bao_sanity_markdown,
+    format_bao_pulls_markdown,
+    get_bao_sanity_summary_dict,
+    compute_bao_pulls,
+)
 from .plots import plot_af, plot_distance_mode, plot_hinf_curves, plot_kernel_histograms, plot_bao_fit_multi
 from .report import write_report
 from .residuals import (
@@ -49,6 +57,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Purist MSOUP closure runner")
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--mode", choices=["kernel", "distance", "both"], default="kernel")
+    parser.add_argument("--bao-sanity", action="store_true",
+                        help="Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK")
     return parser.parse_args(argv)
 
 
@@ -527,6 +537,85 @@ def run_distance_mode(
     return distance_results
 
 
+def run_bao_sanity_diagnostics(
+    cfg: MsoupConfig,
+    delta_m_star: float,
+    output_dir: pathlib.Path,
+) -> Optional[Dict]:
+    """
+    Run BAO sanity diagnostics: compare LCDM_BASELINE, MODEL_BEST, MODEL_WEAK.
+
+    Writes:
+    - bao_audit.csv: per-row pulls for MODEL_BEST case
+    - BAO sanity section in REPORT.md (via returned dict)
+
+    Returns dict with sanity results for summary.json.
+    """
+    print("\n=== BAO Sanity Diagnostics ===")
+
+    # Find BAO probe
+    bao_probe = None
+    for probe in cfg.probes:
+        if probe.type == "bao":
+            bao_probe = probe
+            break
+
+    if bao_probe is None:
+        print("No BAO probe configured, skipping sanity diagnostics")
+        return None
+
+    # Load BAO data
+    df, status = load_bao_observed_data(bao_probe)
+    if df is None:
+        print(f"Could not load BAO data: {status}")
+        return None
+
+    # Cosmology kwargs
+    cosmo_kwargs = {
+        "h_early": cfg.h_early,
+        "omega_m0": cfg.omega_m0,
+        "omega_L0": cfg.omega_L0,
+        "c_km_s": cfg.distance.speed_of_light,
+    }
+    rd = cfg.distance.rd_mpc
+
+    # Run three-case comparison
+    print(f"Running sanity cases with delta_m_star={delta_m_star:.4f}, rd={rd:.2f} Mpc")
+    results = run_bao_sanity_cases(df, delta_m_star, rd, cosmo_kwargs)
+
+    # Print summary to console
+    print("\nBAO Sanity Summary:")
+    print(f"{'Case':<16} {'delta_m':>10} {'chi2':>10} {'dof':>5} {'chi2/dof':>10}")
+    print("-" * 55)
+    for case_name in ["LCDM_BASELINE", "MODEL_BEST", "MODEL_WEAK"]:
+        r = results[case_name]
+        print(f"{case_name:<16} {r.delta_m:>10.4f} {r.total_chi2:>10.2f} {r.total_dof:>5} {r.chi2_dof:>10.3f}")
+
+    # Print per-observable breakdown
+    print("\nPer-observable chi2:")
+    print(f"{'Case':<16} {'DV/rd':>15} {'DM/rd':>15} {'DH/rd':>15}")
+    print("-" * 65)
+    for case_name in ["LCDM_BASELINE", "MODEL_BEST", "MODEL_WEAK"]:
+        r = results[case_name]
+        dv = r.chi2_by_obs.get("DV/rd", (0, 0))
+        dm = r.chi2_by_obs.get("DM/rd", (0, 0))
+        dh = r.chi2_by_obs.get("DH/rd", (0, 0))
+        print(f"{case_name:<16} {dv[0]:>7.2f} ({dv[1]:>2}) {dm[0]:>7.2f} ({dm[1]:>2}) {dh[0]:>7.2f} ({dh[1]:>2})")
+
+    # Print top 5 worst pulls for LCDM_BASELINE
+    print("\nTop 5 worst pulls (LCDM_BASELINE):")
+    for wp in results["LCDM_BASELINE"].worst_pulls:
+        print(f"  z={wp.z:.3f} {wp.observable}: value={wp.value:.3f}, pred={wp.pred:.3f}, pull={wp.pull:+.2f}")
+
+    # Write audit CSV for MODEL_BEST
+    audit_path = output_dir / "bao_audit.csv"
+    write_bao_audit_csv(results["MODEL_BEST"].rows, audit_path)
+    print(f"\nBAO audit CSV written to: {audit_path}")
+
+    # Return summary dict for report
+    return get_bao_sanity_summary_dict(results)
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = load_config(args.config)
@@ -535,6 +624,7 @@ def main(argv=None):
 
     probe_results = None
     distance_results = None
+    bao_sanity_results = None
 
     if args.mode in {"kernel", "both"}:
         probe_results = run_kernel_mode(cfg, output_dir)
@@ -546,10 +636,17 @@ def main(argv=None):
             delta_m_star = probe_results["fit"]["delta_m_star"]
         distance_results = run_distance_mode(cfg, delta_m_star, output_dir, probe_results)
 
+        # Run BAO sanity diagnostics if requested
+        bao_sanity = getattr(args, 'bao_sanity', False)
+        if bao_sanity:
+            bao_sanity_results = run_bao_sanity_diagnostics(
+                cfg, delta_m_star, output_dir
+            )
+
     if probe_results is None:
         probe_results = {"fit": {"delta_m_star": 0.0}}
 
-    write_report(cfg, probe_results, output_dir, distance_results)
+    write_report(cfg, probe_results, output_dir, distance_results, bao_sanity_results)
     print(f"Results written to {output_dir}")
 
 

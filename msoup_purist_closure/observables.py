@@ -66,7 +66,8 @@ def bao_dh(z: np.ndarray, delta_m: float, **kwargs) -> np.ndarray:
     return c_km_s / h_eff_vals
 
 
-def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float, **kwargs) -> float:
+def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float,
+                sanity_check: bool = False, **kwargs) -> float:
     """
     Compute BAO observable prediction for a single redshift.
 
@@ -75,28 +76,70 @@ def bao_predict(z: float, observable: str, delta_m: float, rd_mpc: float, **kwar
         observable: One of 'DV/rd', 'DM/rd', 'DH/rd' (case-insensitive)
         delta_m: MSOUP delta_m parameter
         rd_mpc: Sound horizon at drag epoch in Mpc (fixed, not fitted)
+        sanity_check: If True, perform and log sanity assertions
         **kwargs: Passed to distance functions (h_early, omega_m0, omega_L0, c_km_s)
 
     Returns:
         Predicted observable value (dimensionless ratio)
 
     Raises:
-        ValueError: If observable type is not recognized
+        ValueError: If observable type is not recognized or sanity check fails
     """
+    from .model import h_eff
+
     obs_upper = observable.upper().replace(" ", "")
     z_arr = np.array([z])
+    c_km_s = kwargs.get("c_km_s", 299792.458)
+
+    # Compute base quantities
+    da = angular_diameter_distance(z_arr, delta_m=delta_m, **kwargs)[0]
+    dm = (1 + z) * da  # D_M = (1+z) * D_A
+    h_z = h_eff(
+        z_arr, delta_m=delta_m,
+        h_early=kwargs.get("h_early"),
+        omega_m0=kwargs.get("omega_m0"),
+        omega_L0=kwargs.get("omega_L0"),
+    )[0]
+    dh = c_km_s / h_z  # D_H = c / H(z) in Mpc
+
+    if sanity_check:
+        # Sanity assertions
+        if da <= 0:
+            raise ValueError(f"Sanity check failed: D_A(z={z}) = {da} <= 0")
+        if dm <= 0:
+            raise ValueError(f"Sanity check failed: D_M(z={z}) = {dm} <= 0")
+        if dh <= 0:
+            raise ValueError(f"Sanity check failed: D_H(z={z}) = {dh} <= 0")
+
+        # Check D_M = (1+z) * D_A identity
+        dm_check = (1 + z) * da
+        if abs(dm - dm_check) > 1e-10:
+            raise ValueError(f"Sanity check failed: D_M(z={z}) = {dm} != (1+z)*D_A = {dm_check}")
+
+        # Check H(z) is in plausible range (40 < H(z) < 400 for 0 <= z <= 3)
+        if not (40 < h_z < 400):
+            raise ValueError(f"Sanity check failed: H(z={z}) = {h_z} not in [40, 400] km/s/Mpc")
+
+        # Check ratios are positive and dimensionless (order-of-magnitude reasonable)
+        if rd_mpc <= 0:
+            raise ValueError(f"Sanity check failed: rd_mpc = {rd_mpc} <= 0")
 
     if obs_upper in ("DV/RD", "DV_RD", "DVRD"):
         dv = bao_dv(z_arr, delta_m=delta_m, **kwargs)[0]
-        return dv / rd_mpc
+        result = dv / rd_mpc
     elif obs_upper in ("DM/RD", "DM_RD", "DMRD"):
-        dm = bao_dm(z_arr, delta_m=delta_m, **kwargs)[0]
-        return dm / rd_mpc
+        result = dm / rd_mpc
     elif obs_upper in ("DH/RD", "DH_RD", "DHRD"):
-        dh = bao_dh(z_arr, delta_m=delta_m, **kwargs)[0]
-        return dh / rd_mpc
+        result = dh / rd_mpc
     else:
         raise ValueError(f"Unknown BAO observable: '{observable}'. Supported: DV/rd, DM/rd, DH/rd")
+
+    if sanity_check:
+        # Final check: result should be positive and finite
+        if not (np.isfinite(result) and result > 0):
+            raise ValueError(f"Sanity check failed: {observable}(z={z}) = {result} is not finite positive")
+
+    return result
 
 
 def lens_time_delay_scaling(z_lens: float, z_source: float, delta_m: float, **kwargs) -> float:

@@ -140,6 +140,220 @@ class TestMixedBaoResiduals:
         assert result.chi2 == pytest.approx(0.0)
 
 
+class TestBaoSanityValues:
+    """Tests for BAO observable sanity values at z=0.38 (LCDM baseline)."""
+
+    # Standard Planck 2018 cosmology
+    cosmo_kwargs = {
+        "h_early": 67.0,
+        "omega_m0": 0.315,
+        "omega_L0": 0.685,
+        "c_km_s": 299792.458,
+    }
+    rd_mpc = 147.09  # Planck 2018 sound horizon
+
+    def test_dm_rd_order_of_magnitude_at_z038(self):
+        """DM/rd at z=0.38 should be ~10 (between 5 and 20)."""
+        result = bao_predict(0.38, "DM/rd", delta_m=0.0, rd_mpc=self.rd_mpc, **self.cosmo_kwargs)
+        assert 5 < result < 20, f"DM/rd at z=0.38 = {result}, expected ~10"
+
+    def test_dh_rd_order_of_magnitude_at_z038(self):
+        """DH/rd at z=0.38 should be ~25 (between 10 and 40)."""
+        result = bao_predict(0.38, "DH/rd", delta_m=0.0, rd_mpc=self.rd_mpc, **self.cosmo_kwargs)
+        assert 10 < result < 40, f"DH/rd at z=0.38 = {result}, expected ~25"
+
+    def test_dv_rd_order_of_magnitude_at_z038(self):
+        """DV/rd at z=0.38 should be reasonable (between 5 and 20)."""
+        result = bao_predict(0.38, "DV/rd", delta_m=0.0, rd_mpc=self.rd_mpc, **self.cosmo_kwargs)
+        assert 5 < result < 20, f"DV/rd at z=0.38 = {result}, expected ~10"
+
+    def test_sanity_check_passes_for_valid_input(self):
+        """sanity_check=True should pass for valid LCDM inputs."""
+        # Should not raise any exceptions
+        result = bao_predict(
+            0.38, "DM/rd", delta_m=0.0, rd_mpc=self.rd_mpc,
+            sanity_check=True, **self.cosmo_kwargs
+        )
+        assert np.isfinite(result)
+        assert result > 0
+
+    def test_sanity_check_fails_for_invalid_rd(self):
+        """sanity_check=True should fail for rd_mpc <= 0."""
+        with pytest.raises(ValueError, match="rd_mpc"):
+            bao_predict(
+                0.38, "DM/rd", delta_m=0.0, rd_mpc=-1.0,
+                sanity_check=True, **self.cosmo_kwargs
+            )
+
+
+class TestBaoDiagnostics:
+    """Tests for BAO diagnostic machinery (pulls, audit table, chi2 breakdown)."""
+
+    cosmo_kwargs = {
+        "h_early": 67.0,
+        "omega_m0": 0.315,
+        "omega_L0": 0.685,
+        "c_km_s": 299792.458,
+    }
+    rd_mpc = 147.09
+
+    def test_compute_bao_pulls_returns_rows(self):
+        """compute_bao_pulls returns list of BaoRowResult."""
+        from msoup_purist_closure.bao_diagnostics import compute_bao_pulls
+
+        df = pd.DataFrame({
+            'z': [0.15, 0.38, 0.38],
+            'observable': ['DV/rd', 'DM/rd', 'DH/rd'],
+            'value': [4.47, 10.23, 25.0],
+            'sigma': [0.17, 0.17, 0.76],
+            'tracer': ['MGS', 'BOSS', 'BOSS'],
+            'paper_tag': ['Ross2015', 'Alam2017', 'Alam2017'],
+        })
+
+        rows, chi2_by_obs, total_chi2, total_dof = compute_bao_pulls(
+            df, delta_m=0.0, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+
+        assert len(rows) == 3
+        assert total_dof == 3
+        assert np.isfinite(total_chi2)
+
+    def test_audit_table_has_required_columns(self):
+        """Audit CSV should have required columns."""
+        from msoup_purist_closure.bao_diagnostics import compute_bao_pulls, write_bao_audit_csv
+
+        df = pd.DataFrame({
+            'z': [0.15, 0.38],
+            'observable': ['DV/rd', 'DM/rd'],
+            'value': [4.47, 10.23],
+            'sigma': [0.17, 0.17],
+            'tracer': ['MGS', 'BOSS'],
+            'paper_tag': ['Ross2015', 'Alam2017'],
+        })
+
+        rows, _, _, _ = compute_bao_pulls(
+            df, delta_m=0.0, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            temp_path = Path(f.name)
+
+        try:
+            write_bao_audit_csv(rows, temp_path)
+            audit_df = pd.read_csv(temp_path)
+
+            required_cols = ['z', 'observable', 'value', 'sigma', 'pred', 'resid', 'pull', 'tracer', 'paper_tag']
+            for col in required_cols:
+                assert col in audit_df.columns, f"Missing column: {col}"
+            assert len(audit_df) == 2
+        finally:
+            temp_path.unlink()
+
+    def test_chi2_breakdown_sums_to_total(self):
+        """chi2_by_obs breakdown should sum to total_chi2."""
+        from msoup_purist_closure.bao_diagnostics import compute_bao_pulls
+
+        df = pd.DataFrame({
+            'z': [0.15, 0.38, 0.38, 0.51, 0.51],
+            'observable': ['DV/rd', 'DM/rd', 'DH/rd', 'DM/rd', 'DH/rd'],
+            'value': [4.47, 10.23, 25.0, 13.36, 22.33],
+            'sigma': [0.17, 0.17, 0.76, 0.21, 0.58],
+            'tracer': ['MGS', 'BOSS', 'BOSS', 'BOSS', 'BOSS'],
+            'paper_tag': ['Ross2015', 'Alam2017', 'Alam2017', 'Alam2017', 'Alam2017'],
+        })
+
+        rows, chi2_by_obs, total_chi2, total_dof = compute_bao_pulls(
+            df, delta_m=0.0, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+
+        # Sum chi2 from breakdown
+        chi2_sum = sum(v[0] for v in chi2_by_obs.values())
+        assert chi2_sum == pytest.approx(total_chi2, rel=1e-10), \
+            f"chi2 breakdown sum {chi2_sum} != total {total_chi2}"
+
+        # Sum dof from breakdown
+        dof_sum = sum(v[1] for v in chi2_by_obs.values())
+        assert dof_sum == total_dof, f"dof breakdown sum {dof_sum} != total {total_dof}"
+
+    def test_run_bao_sanity_cases_returns_three_cases(self):
+        """run_bao_sanity_cases returns results for all three cases."""
+        from msoup_purist_closure.bao_diagnostics import run_bao_sanity_cases
+
+        df = pd.DataFrame({
+            'z': [0.38, 0.38],
+            'observable': ['DM/rd', 'DH/rd'],
+            'value': [10.23, 25.0],
+            'sigma': [0.17, 0.76],
+            'tracer': ['BOSS', 'BOSS'],
+            'paper_tag': ['Alam2017', 'Alam2017'],
+        })
+
+        results = run_bao_sanity_cases(
+            df, delta_m_star=0.5, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+
+        assert "LCDM_BASELINE" in results
+        assert "MODEL_BEST" in results
+        assert "MODEL_WEAK" in results
+
+        # Check delta_m values
+        assert results["LCDM_BASELINE"].delta_m == 0.0
+        assert results["MODEL_BEST"].delta_m == 0.5
+        assert results["MODEL_WEAK"].delta_m == pytest.approx(0.125)
+
+    def test_worst_pulls_sorted_by_abs_pull(self):
+        """get_worst_pulls returns rows sorted by |pull| descending."""
+        from msoup_purist_closure.bao_diagnostics import compute_bao_pulls, get_worst_pulls
+
+        df = pd.DataFrame({
+            'z': [0.15, 0.38, 0.51, 0.70, 1.0],
+            'observable': ['DV/rd', 'DM/rd', 'DM/rd', 'DM/rd', 'DM/rd'],
+            'value': [4.47, 10.23, 13.36, 17.0, 23.0],
+            'sigma': [0.17, 0.17, 0.21, 0.25, 0.3],
+            'tracer': ['MGS', 'BOSS', 'BOSS', 'BOSS', 'eBOSS'],
+            'paper_tag': ['Ross2015', 'Alam2017', 'Alam2017', 'Alam2017', 'DESI'],
+        })
+
+        rows, _, _, _ = compute_bao_pulls(
+            df, delta_m=0.0, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+
+        worst = get_worst_pulls(rows, n=3)
+        assert len(worst) == 3
+
+        # Verify sorted by descending |pull|
+        for i in range(len(worst) - 1):
+            assert abs(worst[i].pull) >= abs(worst[i + 1].pull)
+
+    def test_bao_sanity_summary_dict_structure(self):
+        """get_bao_sanity_summary_dict returns properly structured dict."""
+        from msoup_purist_closure.bao_diagnostics import run_bao_sanity_cases, get_bao_sanity_summary_dict
+
+        df = pd.DataFrame({
+            'z': [0.38, 0.38],
+            'observable': ['DM/rd', 'DH/rd'],
+            'value': [10.23, 25.0],
+            'sigma': [0.17, 0.76],
+            'tracer': ['BOSS', 'BOSS'],
+            'paper_tag': ['Alam2017', 'Alam2017'],
+        })
+
+        results = run_bao_sanity_cases(
+            df, delta_m_star=0.5, rd_mpc=self.rd_mpc, cosmo_kwargs=self.cosmo_kwargs
+        )
+        summary = get_bao_sanity_summary_dict(results)
+
+        for case_name in ["LCDM_BASELINE", "MODEL_BEST", "MODEL_WEAK"]:
+            assert case_name in summary
+            case_data = summary[case_name]
+            assert "delta_m" in case_data
+            assert "total_chi2" in case_data
+            assert "total_dof" in case_data
+            assert "chi2_dof" in case_data
+            assert "chi2_by_obs" in case_data
+            assert "worst_pulls" in case_data
+
+
 class TestBaoDataValidation:
     """Tests for BAO data loading and validation."""
 
