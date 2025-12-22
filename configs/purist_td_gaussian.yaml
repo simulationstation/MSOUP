@@ -1,0 +1,52 @@
+# TD-only configuration - Gaussian baseline
+omega_m0: 0.315
+omega_L0: 0.685
+h_early: 67.0
+results_dir: results/msoup_td_only_v2
+data_dir: data_ignored/probes
+
+probes:
+  - name: tdcosmo_full
+    label: "TDCOSMO 7-lens sample (D_dt posteriors)"
+    path: data_ignored/probes/td_master.csv
+    kernel: K2
+    type: td
+    is_local: false
+    z_column: z_lens
+    obs_column: value
+    sigma_column: sigma
+    filter_column: observable_type
+    filter_value: D_dt
+
+fit:
+  h_local: 73.0
+  sigma_local: 1.0
+  delta_m_bounds: [-6, 6]
+  fit_sn_m: false
+
+distance:
+  z_max: 2.5
+  num_z_samples: 256
+  nuisance_M: 0.0
+
+f0:
+  delta_m_min: 0.0
+  delta_m_max: 2.0
+  num_points: 400
+  include_sn: false
+  include_bao: false
+  include_td: true
+  fb_reference: data_ignored/probes/fb_reference.csv
+  output_subdir: msoup_td_only_v2
+  max_rss_mb: 6000
+  dominance_threshold: 0.5
+
+td:
+  use_full_posteriors: true
+  robust_likelihood: gaussian
+  df: 6
+  outlier_eps: 0.05
+  outlier_scale: 6.0
+  systematics_floor_mpc: 0.0
+  systematics_floor_mode: global
+  posterior_bins: 240
