@@ -1,0 +1,303 @@
+# =============================================================================
+# BAO Analysis Catalog Configuration
+# =============================================================================
+# Configuration for preregistered environment-overlap BAO analysis
+# with wedges and BAO template fits
+# =============================================================================
+
+version: "1.0.0"
+created: "2025-12-23"
+
+# -----------------------------------------------------------------------------
+# Cosmology Parameters (Planck 2018)
+# -----------------------------------------------------------------------------
+cosmology:
+  Om0: 0.31
+  H0: 67.66
+  Ob0: 0.049
+  ns: 0.9665
+  sigma8: 0.8102
+
+# -----------------------------------------------------------------------------
+# eBOSS DR16 Configuration
+# -----------------------------------------------------------------------------
+eboss_dr16:
+  base_path: "data/eboss/dr16"
+  processed_path: "data_processed/eboss/dr16"
+
+  LRGpCMASS:
+    description: "BOSS CMASS + eBOSS LRG combined sample"
+    z_range: [0.6, 1.0]
+    z_eff: 0.698
+    fsky: 0.25
+    P0_fkp: 10000.0  # h^-3 Mpc^3
+
+    data:
+      NGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits"
+      SGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-SGC-vDR16.fits"
+
+    random:
+      NGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-NGC-vDR16.fits"
+      SGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-SGC-vDR16.fits"
+
+    data_rec:
+      NGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-NGC-vDR16.fits"
+      SGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-SGC-vDR16.fits"
+
+    random_rec:
+      NGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-NGC-vDR16.fits"
+      SGC: "LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-SGC-vDR16.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights:
+        - name: "WEIGHT_SYSTOT"
+          description: "Imaging systematics weight"
+        - name: "WEIGHT_CP"
+          description: "Close-pair fiber collision weight"
+        - name: "WEIGHT_NOZ"
+          description: "Redshift failure weight"
+        - name: "WEIGHT_FKP"
+          description: "FKP optimal weight"
+      identifier: "LRG_ID"
+      nz: "NZ"
+      flags: ["IN_EBOSS_FOOT", "ISCMASS"]
+
+    weight_expression: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ * WEIGHT_FKP"
+    weight_expression_nofkp: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ"
+
+  QSO:
+    description: "eBOSS Quasar sample (cross-check tracer)"
+    z_range: [0.8, 2.2]
+    z_eff: 1.48
+    P0_fkp: 6000.0
+
+    data:
+      NGC: "QSO/v1/eBOSS_QSO_clustering_data-NGC-vDR16.fits"
+      SGC: "QSO/v1/eBOSS_QSO_clustering_data-SGC-vDR16.fits"
+
+    random:
+      NGC: "QSO/v1/eBOSS_QSO_clustering_random-NGC-vDR16.fits"
+      SGC: "QSO/v1/eBOSS_QSO_clustering_random-SGC-vDR16.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights: ["WEIGHT_SYSTOT", "WEIGHT_CP", "WEIGHT_NOZ", "WEIGHT_FKP"]
+      nz: "NZ"
+
+    weight_expression: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ * WEIGHT_FKP"
+
+# -----------------------------------------------------------------------------
+# DESI EDR Configuration
+# -----------------------------------------------------------------------------
+desi_edr:
+  base_path: "data/desi/edr"
+  processed_path: "data_processed/desi/edr"
+  version: "v2.0"
+  n_randoms: 18  # Total random files available (0-17)
+  n_randoms_use: 4  # Number to download/use
+
+  LRG:
+    description: "DESI EDR Luminous Red Galaxies"
+    z_range: [0.4, 1.1]
+    z_eff: 0.8
+
+    data:
+      N: "LRG/v2.0/LRG_N_clustering.dat.fits"
+      S: "LRG/v2.0/LRG_S_clustering.dat.fits"
+
+    random_pattern: "LRG/v2.0/LRG_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights:
+        - name: "WEIGHT"
+          description: "Combined weight (systematic + completeness + zfail)"
+        - name: "WEIGHT_FKP"
+          description: "FKP optimal weight"
+        - name: "WEIGHT_ZFAIL"
+          description: "Redshift failure weight"
+      identifier: "TARGETID"
+      nz: "NZ"
+      bitweights: "BITWEIGHTS"
+      prob_obs: "PROB_OBS"
+      ntile: "NTILE"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+
+  ELG:
+    description: "DESI EDR Emission Line Galaxies (not QSO)"
+    z_range: [0.8, 1.6]
+    z_eff: 1.1
+    sample_name: "ELGnotqso"
+
+    data:
+      N: "ELG/v2.0/ELGnotqso_N_clustering.dat.fits"
+      S: "ELG/v2.0/ELGnotqso_S_clustering.dat.fits"
+
+    random_pattern: "ELG/v2.0/ELGnotqso_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights: ["WEIGHT", "WEIGHT_FKP", "WEIGHT_ZFAIL"]
+      identifier: "TARGETID"
+      nz: "NZ"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+
+  QSO:
+    description: "DESI EDR Quasars"
+    z_range: [0.8, 2.1]
+    z_eff: 1.4
+
+    data:
+      N: "QSO/v2.0/QSO_N_clustering.dat.fits"
+      S: "QSO/v2.0/QSO_S_clustering.dat.fits"
+
+    random_pattern: "QSO/v2.0/QSO_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights: ["WEIGHT", "WEIGHT_FKP", "WEIGHT_ZFAIL"]
+      identifier: "TARGETID"
+      nz: "NZ"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+
+# -----------------------------------------------------------------------------
+# DESI DR1 Configuration
+# -----------------------------------------------------------------------------
+desi_dr1:
+  base_path: "data/desi/dr1"
+  processed_path: "data_processed/desi/dr1"
+  version: "v1.5"
+  spectro_pipeline: "iron"
+  n_randoms: 18
+  n_randoms_use: 4
+
+  LRG:
+    description: "DESI DR1 Luminous Red Galaxies"
+    z_range: [0.4, 1.1]
+    z_bins:
+      - {z_min: 0.4, z_max: 0.6, z_eff: 0.51}
+      - {z_min: 0.6, z_max: 0.8, z_eff: 0.71}
+      - {z_min: 0.8, z_max: 1.1, z_eff: 0.93}
+
+    data:
+      NGC: "LRG/v1.5/LRG_NGC_clustering.dat.fits"
+      SGC: "LRG/v1.5/LRG_SGC_clustering.dat.fits"
+
+    random_pattern: "LRG/v1.5/LRG_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights:
+        - name: "WEIGHT"
+          description: "Combined weight for clustering"
+        - name: "WEIGHT_SYS"
+          description: "Imaging systematics weight (RF method)"
+        - name: "WEIGHT_COMP"
+          description: "Fiber assignment completeness weight"
+        - name: "WEIGHT_ZFAIL"
+          description: "Redshift failure weight"
+        - name: "WEIGHT_FKP"
+          description: "FKP optimal weight"
+      identifier: "TARGETID"
+      nz: "NZ"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+    weight_expression_decomposed: "WEIGHT_SYS * WEIGHT_COMP * WEIGHT_ZFAIL * WEIGHT_FKP"
+
+  ELG:
+    description: "DESI DR1 Emission Line Galaxies (LOP, not QSO)"
+    z_range: [0.8, 1.6]
+    z_bins:
+      - {z_min: 0.8, z_max: 1.1, z_eff: 0.93}
+      - {z_min: 1.1, z_max: 1.6, z_eff: 1.32}
+    sample_name: "ELG_LOPnotqso"
+
+    data:
+      NGC: "ELG/v1.5/ELG_LOPnotqso_NGC_clustering.dat.fits"
+      SGC: "ELG/v1.5/ELG_LOPnotqso_SGC_clustering.dat.fits"
+
+    random_pattern: "ELG/v1.5/ELG_LOPnotqso_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights: ["WEIGHT", "WEIGHT_SYS", "WEIGHT_COMP", "WEIGHT_ZFAIL", "WEIGHT_FKP"]
+      identifier: "TARGETID"
+      nz: "NZ"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+
+  QSO:
+    description: "DESI DR1 Quasars"
+    z_range: [0.8, 2.1]
+    z_bins:
+      - {z_min: 0.8, z_max: 1.3, z_eff: 1.05}
+      - {z_min: 1.3, z_max: 2.1, z_eff: 1.65}
+
+    data:
+      NGC: "QSO/v1.5/QSO_NGC_clustering.dat.fits"
+      SGC: "QSO/v1.5/QSO_SGC_clustering.dat.fits"
+
+    random_pattern: "QSO/v1.5/QSO_{region}_{i}_clustering.ran.fits"
+
+    columns:
+      position: ["RA", "DEC", "Z"]
+      weights: ["WEIGHT", "WEIGHT_SYS", "WEIGHT_COMP", "WEIGHT_ZFAIL", "WEIGHT_FKP"]
+      identifier: "TARGETID"
+      nz: "NZ"
+
+    weight_expression: "WEIGHT * WEIGHT_FKP"
+
+# -----------------------------------------------------------------------------
+# BAO Analysis Configuration
+# -----------------------------------------------------------------------------
+bao_analysis:
+  # Fiducial cosmology for distance conversions
+  fiducial:
+    Om0: 0.31
+    h: 0.6766
+    rd: 147.09  # Sound horizon in Mpc
+
+  # Wedge binning
+  wedges:
+    mu_bins: [[0.0, 0.5], [0.5, 0.8], [0.8, 1.0]]
+    mu_labels: ["transverse", "intermediate", "radial"]
+
+  # Separation binning
+  s_bins:
+    min: 20.0
+    max: 200.0
+    step: 5.0
+    units: "Mpc/h"
+
+  # Template fitting
+  template:
+    smooth_scale: 15.0  # Mpc/h
+    polynomial_order: 3
+    alpha_range: [0.8, 1.2]
+    sigma_nl_perp: 4.0  # Mpc/h
+    sigma_nl_para: 8.0  # Mpc/h
+
+# -----------------------------------------------------------------------------
+# Validation Checks
+# -----------------------------------------------------------------------------
+validation:
+  ra_range: [0.0, 360.0]
+  dec_range: [-90.0, 90.0]
+  weight_range: [0.0, 100.0]
+  weight_allow_nan: false
+  z_tolerance: 0.01  # Allow z slightly outside nominal range
+
+# -----------------------------------------------------------------------------
+# Processing Configuration
+# -----------------------------------------------------------------------------
+processing:
+  output_format: "parquet"
+  compression: "snappy"
+  float_precision: "float64"
+  coordinate_precision: "float64"
+  weight_precision: "float64"
+  index_columns: ["TARGETID"]

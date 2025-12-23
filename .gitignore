@@ -77,8 +77,13 @@ data/**/__pycache__/
 
 # MSOUP purist closure data/results exclusions
 data/
+data_processed/
 data_ignored/
 results/
+
+# BAO analysis download artifacts
+download.log
+checksums_verified.txt
 *.fits
 *.hdf5
 *.npz
