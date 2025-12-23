@@ -25,7 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}"
 CONFIG_DIR="${REPO_DIR}/configs"
-OUTPUT_DIR="${REPO_DIR}/results/eboss_lrgpcmass_primary"
+OUTPUT_DIR="${REPO_DIR}/../today_results"
 AUDIT_LOG="${OUTPUT_DIR}/audit_log.json"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 

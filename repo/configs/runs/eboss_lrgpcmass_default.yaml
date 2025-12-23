@@ -7,7 +7,7 @@
 
 name: "eboss_lrgpcmass_primary"
 catalog: "eboss_lrgpcmass"
-output_dir: "results/eboss_lrgpcmass_primary"
+output_dir: "../today_results"
 
 # Reference to preregistration and datasets
 preregistration: "configs/preregistration.yaml"

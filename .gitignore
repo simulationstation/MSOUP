@@ -84,6 +84,9 @@ results/
 # BAO analysis download artifacts
 download.log
 checksums_verified.txt
+
+# BAO analysis results (regenerated from pipeline)
+today_results/
 *.fits
 *.hdf5
 *.npz
