@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
+from math import sqrt
 
 
 def logsumexp(arr: np.ndarray) -> float:
@@ -52,10 +53,13 @@ def info_fractions(loglike_matrix: np.ndarray) -> List[float]:
 @dataclass
 class LOOEntry:
     lens_id: str
-    pareto_k: float
     delta_m_shift: float
     median_loo: float
     median_full: float
+    pareto_k: float | None = math.nan
+    low68: float | None = None
+    high68: float | None = None
+    f0_median: float | None = None
 
 
 def loo_diagnostics(lens_ids: Sequence[str], delta_grid: np.ndarray, loglike_matrix: np.ndarray, weights: np.ndarray) -> List[LOOEntry]:
@@ -67,18 +71,26 @@ def loo_diagnostics(lens_ids: Sequence[str], delta_grid: np.ndarray, loglike_mat
         norm = logsumexp(loo_logw)
         loo_weights = np.exp(loo_logw - norm)
         loo_weights /= loo_weights.sum()
-        pareto = _approx_pareto_k(loo_weights)
         median_loo = weighted_median(delta_grid, loo_weights)
         entries.append(
             LOOEntry(
                 lens_id=lens_id,
-                pareto_k=pareto,
                 delta_m_shift=median_loo - full_med,
                 median_loo=median_loo,
                 median_full=full_med,
             )
         )
     return entries
+
+
+def edge_masses(weights: np.ndarray, bins: int = 2) -> tuple[float, float]:
+    weights = np.asarray(weights, dtype=float)
+    if weights.size == 0:
+        return math.nan, math.nan
+    w = weights / np.sum(weights)
+    low = float(np.sum(w[:bins]))
+    high = float(np.sum(w[-bins:]))
+    return low, high
 
 
 @dataclass
@@ -88,6 +100,7 @@ class PPCEntry:
     sigma: float
     pull: float
     support: str
+    tail_prob: float | None = math.nan
 
 
 def dominance_kill_table(info_fracs: List[float], loo_entries: List[LOOEntry], ppc: List[PPCEntry], sigma_ref: float) -> Dict[str, bool]:
@@ -102,3 +115,12 @@ def dominance_kill_table(info_fracs: List[float], loo_entries: List[LOOEntry], p
         "K-LOO": loo_ok,
         "K-PPC": ppc_ok,
     }
+
+
+def gaussian_two_tailed_prob(pull: float) -> float:
+    if not np.isfinite(pull):
+        return math.nan
+    x = abs(pull)
+    # survival function for standard normal via erfc
+    tail = 0.5 * math.erfc(x / sqrt(2))
+    return float(2 * tail)

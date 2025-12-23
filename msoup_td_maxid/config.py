@@ -25,8 +25,8 @@ class PathsConfig:
 class PriorConfig:
     """Priors and grids for the inference."""
 
-    delta_m_min: float = -0.5
-    delta_m_max: float = 0.6
+    delta_m_min: float = -1.0
+    delta_m_max: float = 3.0
     delta_m_points: int = 121
     tau0: float = 0.05
     student_df: float = 6.0

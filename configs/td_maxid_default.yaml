@@ -3,8 +3,8 @@ paths:
   posterior_dir: data_ignored/td_posteriors
   output_dir: results/td_maxid
 priors:
-  delta_m_min: -0.5
-  delta_m_max: 0.6
+  delta_m_min: -1.0
+  delta_m_max: 3.0  # Wider support to avoid posterior truncation and enable valid summaries
   delta_m_points: 161
   tau0: 0.05
   student_df: 6.0
