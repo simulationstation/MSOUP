@@ -1,0 +1,19 @@
+name: "desi_edr_lrg_default"
+preregistration: "configs/preregistration.yaml"
+datasets: "configs/datasets.yaml"
+catalog: "desi_edr_lrg"
+output_dir: "outputs/desi_edr_lrg_default"
+blinding:
+  unblind: false
+stages:
+  - io
+  - overlap_metric
+  - correlation
+  - bao_fit
+  - hierarchical
+  - mocks
+  - qa
+  - reporting
+runtime:
+  n_workers: 4
+  dry_run_fraction: 0.02
