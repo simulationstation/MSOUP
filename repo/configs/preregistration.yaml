@@ -1,0 +1,55 @@
+version: 1
+analysis:
+  fiducial_cosmology:
+    omega_m: 0.31
+    h: 0.676
+  random_seed: 12345
+  blinding:
+    method: "beta_significance"
+    unblind: false
+  correlation:
+    s_min: 50.0
+    s_max: 180.0
+    s_bin: 5.0
+    mu_min: 0.0
+    mu_max: 1.0
+    mu_bin: 0.01
+    wedges:
+      tangential: [0.0, 0.2]
+      radial: [0.8, 1.0]
+  overlap_metric:
+    primary: "E1"
+    secondary: "E2"
+    smoothing_radii: [10.0, 15.0, 20.0]
+    line_integral_step: 2.0
+    normalize: true
+    pair_subsample: 0.1
+  environment_binning:
+    primary_method: "bin_by_galaxy"
+    n_bins: 4
+    quantiles: [0.0, 0.25, 0.5, 0.75, 1.0]
+  reconstruction:
+    enabled: true
+    smoothing_radius: 15.0
+  bao_fitting:
+    nuisance_model: "poly_inv_s"
+    nuisance_terms: ["a0", "a1/s", "a2/s^2"]
+    fit_range: [60.0, 160.0]
+  hierarchical_inference:
+    primary_estimator: "two_step"
+    bayesian: false
+    priors:
+      beta_mean: 0.0
+      beta_sigma: 1.0
+  mocks:
+    n_mocks: 5
+    parallel: true
+  qa:
+    enable: true
+    wedge_variants:
+      - [0.0, 0.2]
+      - [0.0, 0.3]
+    smoothing_variants: [10.0, 20.0]
+  reporting:
+    generate_figures: true
+    generate_methods_snapshot: true

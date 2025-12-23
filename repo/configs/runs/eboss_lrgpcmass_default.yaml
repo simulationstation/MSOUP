@@ -1,0 +1,19 @@
+name: "eboss_lrgpcmass_default"
+preregistration: "configs/preregistration.yaml"
+datasets: "configs/datasets.yaml"
+catalog: "eboss_lrgpcmass"
+output_dir: "outputs/eboss_lrgpcmass_default"
+blinding:
+  unblind: false
+stages:
+  - io
+  - overlap_metric
+  - correlation
+  - bao_fit
+  - hierarchical
+  - mocks
+  - qa
+  - reporting
+runtime:
+  n_workers: 4
+  dry_run_fraction: 0.02

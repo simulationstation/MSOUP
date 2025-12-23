@@ -1,0 +1,26 @@
+version: 1
+catalogs:
+  eboss_lrgpcmass:
+    data:
+      path: "/path/to/eboss/lrgpcmass/data.fits"
+      format: "fits"
+    randoms:
+      path: "/path/to/eboss/lrgpcmass/randoms.fits"
+      format: "fits"
+    tracer: "LRGpCMASS"
+    z_range: [0.6, 1.0]
+    regions: ["NGC", "SGC"]
+    weights:
+      total: "WEIGHT_FKP * WEIGHT_SYSTOT * WEIGHT_CP"
+  desi_edr_lrg:
+    data:
+      path: "/path/to/desi/edr/lrg/data.parquet"
+      format: "parquet"
+    randoms:
+      path: "/path/to/desi/edr/lrg/randoms.parquet"
+      format: "parquet"
+    tracer: "LRG"
+    z_range: [0.4, 1.1]
+    regions: ["NGC", "SGC"]
+    weights:
+      total: "WEIGHT_FKP * WEIGHT_SYS"
