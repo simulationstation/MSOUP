@@ -1,55 +1,401 @@
-version: 1
-analysis:
-  fiducial_cosmology:
-    omega_m: 0.31
-    h: 0.676
-  random_seed: 12345
-  blinding:
-    method: "beta_significance"
-    unblind: false
-  correlation:
+# ==============================================================================
+# PREREGISTRATION CONFIGURATION - LOCKED
+# ==============================================================================
+# Version: 1.0.0
+# Date: 2025-12-23
+# Status: LOCKED - DO NOT MODIFY AFTER HASH COMPUTATION
+# ==============================================================================
+
+version: "1.0.0"
+status: "locked"
+lock_date: "2025-12-23"
+
+# ------------------------------------------------------------------------------
+# Research Question
+# ------------------------------------------------------------------------------
+research_question:
+  primary: >
+    Does BAO tangential dilation alpha_perp shift with environment-overlap
+    strength E in post-DR7 datasets, beyond LCDM mock expectations and
+    beyond what BAO reconstruction removes?
+  null_hypothesis: "beta = 0 (no environment dependence of alpha_perp)"
+
+# ------------------------------------------------------------------------------
+# Primary Endpoint
+# ------------------------------------------------------------------------------
+primary_endpoint:
+  parameter: "beta"
+  model: "alpha_perp(E) = alpha_0 + beta * E"
+  wedge:
+    type: "tangential"
+    mu_min: 0.0
+    mu_max: 0.2
+  separation:
+    s_min: 50.0  # h^-1 Mpc
+    s_max: 180.0
+    s_bin: 5.0
+    n_bins: 26
+    units: "h^-1 Mpc"
+
+# ------------------------------------------------------------------------------
+# Primary Dataset
+# ------------------------------------------------------------------------------
+primary_dataset:
+  survey: "eBOSS"
+  release: "DR16"
+  sample: "LRGpCMASS"
+  description: "Combined BOSS CMASS + eBOSS LRG"
+  z_range:
+    z_min: 0.6
+    z_max: 1.0
+  z_eff: 0.698
+  regions: ["NGC", "SGC"]
+
+  files:
+    data_ngc: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits"
+    data_sgc: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-SGC-vDR16.fits"
+    random_ngc: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-NGC-vDR16.fits"
+    random_sgc: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-SGC-vDR16.fits"
+    data_ngc_rec: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-NGC-vDR16.fits"
+    data_sgc_rec: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-SGC-vDR16.fits"
+    random_ngc_rec: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-NGC-vDR16.fits"
+    random_sgc_rec: "data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-SGC-vDR16.fits"
+
+  provenance_url: "https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/"
+
+# ------------------------------------------------------------------------------
+# Environment Metric (E1 - Primary)
+# ------------------------------------------------------------------------------
+environment_metric:
+  primary:
+    name: "E1"
+    description: "Line-integrated smoothed overdensity along pair paths"
+    algorithm: "trapezoidal_line_integral"
+    parameters:
+      smoothing_radius: 15.0  # h^-1 Mpc (LOCKED)
+      line_integral_step: 2.0  # h^-1 Mpc (LOCKED)
+      pair_subsample_fraction: 0.1  # (LOCKED)
+    normalization:
+      method: "median_mad"
+      formula: "(E - median(E)) / MAD(E)"
+    assignment:
+      method: "per_galaxy_mean"
+      description: "Mean E1 over all pairs containing each galaxy"
+
+  secondary:
+    name: "E2"
+    description: "Supercluster voxel overlap"
+    algorithm: "binary_path_intersection"
+    parameters:
+      delta_threshold: 1.0
+      voxel_size: 10.0  # h^-1 Mpc
+
+# ------------------------------------------------------------------------------
+# Correlation Function
+# ------------------------------------------------------------------------------
+correlation:
+  estimator: "landy_szalay"
+  formula: "(DD - 2*DR + RR) / RR"
+
+  binning:
     s_min: 50.0
     s_max: 180.0
     s_bin: 5.0
     mu_min: 0.0
     mu_max: 1.0
     mu_bin: 0.01
-    wedges:
-      tangential: [0.0, 0.2]
-      radial: [0.8, 1.0]
-  overlap_metric:
-    primary: "E1"
-    secondary: "E2"
-    smoothing_radii: [10.0, 15.0, 20.0]
-    line_integral_step: 2.0
-    normalize: true
-    pair_subsample: 0.1
-  environment_binning:
-    primary_method: "bin_by_galaxy"
-    n_bins: 4
-    quantiles: [0.0, 0.25, 0.5, 0.75, 1.0]
-  reconstruction:
-    enabled: true
-    smoothing_radius: 15.0
-  bao_fitting:
-    nuisance_model: "poly_inv_s"
-    nuisance_terms: ["a0", "a1/s", "a2/s^2"]
-    fit_range: [60.0, 160.0]
-  hierarchical_inference:
-    primary_estimator: "two_step"
-    bayesian: false
+
+  wedges:
+    tangential:
+      mu_min: 0.0
+      mu_max: 0.2
+      label: "transverse"
+    radial:
+      mu_min: 0.8
+      mu_max: 1.0
+      label: "line-of-sight"
+
+# ------------------------------------------------------------------------------
+# Weights
+# ------------------------------------------------------------------------------
+weights:
+  expression: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ * WEIGHT_FKP"
+  components:
+    WEIGHT_SYSTOT: "imaging systematics correction"
+    WEIGHT_CP: "close-pair fiber collision upweight"
+    WEIGHT_NOZ: "redshift failure correction"
+    WEIGHT_FKP: "FKP optimal weight"
+  fkp_P0: 10000.0  # h^-3 Mpc^3
+
+# ------------------------------------------------------------------------------
+# Covariance
+# ------------------------------------------------------------------------------
+covariance:
+  primary_method: "mocks"
+  mock_source: "EZmocks"
+  n_mocks_covariance: 200
+  n_mocks_null_distribution: 1000
+
+  fallback_method: "jackknife"
+  jackknife:
+    n_regions: 100
+    scheme: "healpix"
+    nside: 4
+
+# ------------------------------------------------------------------------------
+# BAO Template Fitting
+# ------------------------------------------------------------------------------
+bao_fitting:
+  template:
+    source: "eisenstein_hu_1998"
+    fiducial_cosmology: true
+
+  model:
+    formula: "B^2 * xi_template(alpha * s) + A(s)"
+    parameters:
+      alpha: "dilation parameter"
+      B: "amplitude"
+
+  nuisance:
+    polynomial: "a0 + a1/s + a2/s^2"
+    terms: ["a0", "a1/s", "a2/s^2"]
+    order: 2
+
+  fit_range:
+    s_min: 60.0
+    s_max: 160.0
+
+  method: "chi2_minimization"
+  optimizer: "L-BFGS-B"
+
+# ------------------------------------------------------------------------------
+# Reconstruction
+# ------------------------------------------------------------------------------
+reconstruction:
+  enabled: true
+  source: "sdss_pipeline"
+  parameters:
+    bias: 2.0
+    smoothing: 15.0  # h^-1 Mpc
+    fiducial_Om: 0.31
+
+# ------------------------------------------------------------------------------
+# Environment Binning
+# ------------------------------------------------------------------------------
+environment_binning:
+  method: "quantiles"
+  n_bins: 4
+  quantile_edges: [0.0, 0.25, 0.5, 0.75, 1.0]
+  assignment: "per_galaxy"
+
+# ------------------------------------------------------------------------------
+# Hierarchical Inference
+# ------------------------------------------------------------------------------
+hierarchical_inference:
+  primary_method: "two_step"
+  description: "Linear regression of alpha_perp on E bin centers"
+
+  bayesian_option:
+    enabled: false
     priors:
       beta_mean: 0.0
       beta_sigma: 1.0
-  mocks:
-    n_mocks: 5
-    parallel: true
-  qa:
-    enable: true
-    wedge_variants:
-      - [0.0, 0.2]
-      - [0.0, 0.3]
-    smoothing_variants: [10.0, 20.0]
-  reporting:
-    generate_figures: true
-    generate_methods_snapshot: true
+    sampler: "emcee"
+    n_walkers: 32
+    n_steps: 5000
+    burn_in: 1000
+
+# ------------------------------------------------------------------------------
+# Blinding
+# ------------------------------------------------------------------------------
+blinding:
+  method: "beta_offset_and_encryption"
+
+  offset:
+    distribution: "uniform"
+    range: [-0.5, 0.5]
+    applied_to: "beta"
+
+  encryption:
+    algorithm: "fernet"
+    key_file: "~/.bao_blind_key"
+    key_permissions: "0600"
+    encrypted_fields: ["beta_true", "sigma_beta", "significance"]
+
+  visible_during_blinding:
+    - "xi_wedge_measurements"
+    - "environment_bin_assignments"
+    - "mock_pipeline_outputs"
+    - "covariance_matrices"
+    - "qa_diagnostics"
+
+  hidden_during_blinding:
+    - "beta_significance"
+    - "mock_percentile"
+    - "detection_decision"
+
+  unblind_requirements:
+    - "all_robustness_checks_complete"
+    - "explicit_confirm_flag"
+    - "audit_log_entry"
+
+# ------------------------------------------------------------------------------
+# Decision Criteria
+# ------------------------------------------------------------------------------
+decision_criteria:
+  detection:
+    description: "Declare anomalous environment scaling"
+    conditions:
+      statistical_significance:
+        threshold: 3.0
+        metric: "|beta| / sigma_beta"
+      mock_calibration:
+        percentile_threshold: 99.7
+        description: "beta_obs beyond 99.7th percentile of mock distribution"
+      reconstruction_persistence:
+        post_recon_significance: 2.0
+        post_recon_percentile: 95.0
+    require_all: true
+
+  null:
+    description: "Accept null hypothesis beta = 0"
+    conditions:
+      significance_below: 2.0
+      within_mock_percentile: [5.0, 95.0]
+    require_all: true
+
+  inconclusive:
+    description: "Neither detection nor null criteria met"
+    action: "proceed_to_desi"
+
+# ------------------------------------------------------------------------------
+# Secondary Endpoints
+# ------------------------------------------------------------------------------
+secondary_endpoints:
+  - name: "beta_E2"
+    description: "Beta for E2 supercluster voxel overlap"
+    metric: "E2"
+    wedge: "tangential"
+
+  - name: "beta_radial"
+    description: "Radial wedge beta (control)"
+    metric: "E1"
+    wedge: "radial"
+    purpose: "systematics_check"
+
+  - name: "tracer_consistency"
+    description: "QSO/ELG tracer cross-check"
+    tracers: ["QSO", "ELG"]
+    requirement: "beta_consistent_within_2sigma"
+
+  - name: "regional_consistency"
+    description: "NGC vs SGC consistency"
+    regions: ["NGC", "SGC"]
+    requirement: "beta_consistent_within_2sigma"
+
+# ------------------------------------------------------------------------------
+# Robustness Checks
+# ------------------------------------------------------------------------------
+robustness_checks:
+  smoothing_variants:
+    - {name: "R10", smoothing_radius: 10.0, primary: false}
+    - {name: "R15", smoothing_radius: 15.0, primary: true}
+    - {name: "R20", smoothing_radius: 20.0, primary: false}
+
+  wedge_variants:
+    - {name: "W02", mu_max: 0.2, primary: true}
+    - {name: "W025", mu_max: 0.25, primary: false}
+    - {name: "W03", mu_max: 0.3, primary: false}
+
+  separation_variants:
+    - {name: "S50_180", s_min: 50, s_max: 180, primary: true}
+    - {name: "S60_160", s_min: 60, s_max: 160, primary: false}
+    - {name: "S40_200", s_min: 40, s_max: 200, primary: false}
+
+  weight_variants:
+    - {name: "W_FULL", description: "All weights", primary: true}
+    - {name: "W_NOTOP", description: "Remove top 0.5% by weight", primary: false}
+    - {name: "W_NOCP", description: "Exclude WEIGHT_CP", primary: false}
+
+  fit_variants:
+    - {name: "POLY2", nuisance_order: 2, primary: true}
+    - {name: "POLY3", nuisance_order: 3, primary: false}
+    - {name: "POLY1", nuisance_order: 1, primary: false}
+
+  binning_variants:
+    - {name: "Q4", n_bins: 4, primary: true}
+    - {name: "Q5", n_bins: 5, primary: false}
+    - {name: "Q3", n_bins: 3, primary: false}
+
+  pass_criteria:
+    beta_change_max: 1.0  # sigma units
+    sign_preserved: true
+    significance_change_max: 1.0  # sigma units
+
+# ------------------------------------------------------------------------------
+# Stopping Rules
+# ------------------------------------------------------------------------------
+stopping_rules:
+  proceed_to_desi:
+    - "eboss_inconclusive"
+    - "eboss_detection_needs_confirmation"
+    - "null_but_desi_provides_3x_power"
+
+  terminate:
+    - "critical_pipeline_bug"
+    - "mock_distribution_pathological"
+    - "robustness_failure_rate_above_50_percent"
+
+  accept_null:
+    - "significance_below_2sigma"
+    - "within_mock_90percent_interval"
+    - "all_robustness_checks_pass"
+    - "no_qa_anomalies"
+
+# ------------------------------------------------------------------------------
+# Fiducial Cosmology
+# ------------------------------------------------------------------------------
+fiducial_cosmology:
+  omega_m: 0.31
+  h: 0.676
+  omega_b: 0.049
+  sigma8: 0.81
+  n_s: 0.97
+  r_d: 147.09  # Mpc
+
+# ------------------------------------------------------------------------------
+# Random Seed
+# ------------------------------------------------------------------------------
+random_seed: 12345
+
+# ------------------------------------------------------------------------------
+# Mocks Configuration
+# ------------------------------------------------------------------------------
+mocks:
+  source: "EZmocks"
+  n_available: 1000
+  n_covariance: 200
+  n_null_distribution: 1000
+  parallel: true
+  max_workers: 8
+
+# ------------------------------------------------------------------------------
+# QA Settings
+# ------------------------------------------------------------------------------
+qa:
+  enabled: true
+  checks:
+    - "weight_distribution"
+    - "redshift_distribution"
+    - "angular_coverage"
+    - "pair_count_sanity"
+    - "correlation_smoothness"
+
+# ------------------------------------------------------------------------------
+# Reporting
+# ------------------------------------------------------------------------------
+reporting:
+  generate_figures: true
+  figure_formats: ["pdf", "png"]
+  generate_methods_snapshot: true
+  generate_audit_log: true

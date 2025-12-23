@@ -1,26 +1,264 @@
+# ==============================================================================
+# Dataset Configuration for BAO Environment-Overlap Analysis
+# ==============================================================================
+# This file defines catalog locations and properties for all surveys.
+# Paths are relative to the repository root (../data/ from configs/)
+# ==============================================================================
+
 version: 1
+data_root: "../data"
+
+# ------------------------------------------------------------------------------
+# eBOSS DR16 Catalogs
+# ------------------------------------------------------------------------------
 catalogs:
   eboss_lrgpcmass:
-    data:
-      path: "/path/to/eboss/lrgpcmass/data.fits"
-      format: "fits"
-    randoms:
-      path: "/path/to/eboss/lrgpcmass/randoms.fits"
-      format: "fits"
+    survey: "eBOSS"
+    release: "DR16"
     tracer: "LRGpCMASS"
+    description: "Combined BOSS CMASS + eBOSS LRG sample"
+
+    regions:
+      NGC:
+        data: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits"
+        randoms: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-NGC-vDR16.fits"
+        data_rec: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-NGC-vDR16.fits"
+        randoms_rec: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-NGC-vDR16.fits"
+      SGC:
+        data: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-SGC-vDR16.fits"
+        randoms: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-SGC-vDR16.fits"
+        data_rec: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data_rec-SGC-vDR16.fits"
+        randoms_rec: "eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random_rec-SGC-vDR16.fits"
+
+    format: "fits"
     z_range: [0.6, 1.0]
-    regions: ["NGC", "SGC"]
+    z_eff: 0.698
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight_systot: "WEIGHT_SYSTOT"
+      weight_cp: "WEIGHT_CP"
+      weight_noz: "WEIGHT_NOZ"
+      weight_fkp: "WEIGHT_FKP"
+      nz: "NZ"
+      id: "LRG_ID"
+
     weights:
-      total: "WEIGHT_FKP * WEIGHT_SYSTOT * WEIGHT_CP"
+      total: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ * WEIGHT_FKP"
+      clustering: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ"
+      fkp_only: "WEIGHT_FKP"
+
+    provenance: "https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/"
+
+  eboss_qso:
+    survey: "eBOSS"
+    release: "DR16"
+    tracer: "QSO"
+    description: "eBOSS Quasar sample (cross-check tracer)"
+
+    regions:
+      NGC:
+        data: "eboss/dr16/QSO/v1/eBOSS_QSO_clustering_data-NGC-vDR16.fits"
+        randoms: "eboss/dr16/QSO/v1/eBOSS_QSO_clustering_random-NGC-vDR16.fits"
+      SGC:
+        data: "eboss/dr16/QSO/v1/eBOSS_QSO_clustering_data-SGC-vDR16.fits"
+        randoms: "eboss/dr16/QSO/v1/eBOSS_QSO_clustering_random-SGC-vDR16.fits"
+
+    format: "fits"
+    z_range: [0.8, 2.2]
+    z_eff: 1.48
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight_systot: "WEIGHT_SYSTOT"
+      weight_cp: "WEIGHT_CP"
+      weight_noz: "WEIGHT_NOZ"
+      weight_fkp: "WEIGHT_FKP"
+      nz: "NZ"
+
+    weights:
+      total: "WEIGHT_SYSTOT * WEIGHT_CP * WEIGHT_NOZ * WEIGHT_FKP"
+
+    provenance: "https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/"
+
+# ------------------------------------------------------------------------------
+# DESI EDR Catalogs
+# ------------------------------------------------------------------------------
   desi_edr_lrg:
-    data:
-      path: "/path/to/desi/edr/lrg/data.parquet"
-      format: "parquet"
-    randoms:
-      path: "/path/to/desi/edr/lrg/randoms.parquet"
-      format: "parquet"
+    survey: "DESI"
+    release: "EDR"
+    version: "v2.0"
     tracer: "LRG"
+    description: "DESI Early Data Release LRG sample"
+
+    regions:
+      N:
+        data: "desi/edr/LRG/v2.0/LRG_N_clustering.dat.fits"
+        randoms_pattern: "desi/edr/LRG/v2.0/LRG_N_{i}_clustering.ran.fits"
+        n_randoms: 18
+      S:
+        data: "desi/edr/LRG/v2.0/LRG_S_clustering.dat.fits"
+        randoms_pattern: "desi/edr/LRG/v2.0/LRG_S_{i}_clustering.ran.fits"
+        n_randoms: 18
+
+    format: "fits"
     z_range: [0.4, 1.1]
-    regions: ["NGC", "SGC"]
+    z_eff: 0.8
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight: "WEIGHT"
+      weight_fkp: "WEIGHT_FKP"
+      weight_zfail: "WEIGHT_ZFAIL"
+      nz: "NZ"
+      id: "TARGETID"
+
     weights:
-      total: "WEIGHT_FKP * WEIGHT_SYS"
+      total: "WEIGHT * WEIGHT_FKP"
+      clustering: "WEIGHT"
+
+    provenance: "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/"
+
+  desi_edr_elg:
+    survey: "DESI"
+    release: "EDR"
+    version: "v2.0"
+    tracer: "ELGnotqso"
+    description: "DESI Early Data Release ELG sample (not QSO)"
+
+    regions:
+      N:
+        data: "desi/edr/ELG/v2.0/ELGnotqso_N_clustering.dat.fits"
+        randoms_pattern: "desi/edr/ELG/v2.0/ELGnotqso_N_{i}_clustering.ran.fits"
+        n_randoms: 18
+      S:
+        data: "desi/edr/ELG/v2.0/ELGnotqso_S_clustering.dat.fits"
+        randoms_pattern: "desi/edr/ELG/v2.0/ELGnotqso_S_{i}_clustering.ran.fits"
+        n_randoms: 18
+
+    format: "fits"
+    z_range: [0.8, 1.6]
+    z_eff: 1.1
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight: "WEIGHT"
+      weight_fkp: "WEIGHT_FKP"
+      nz: "NZ"
+      id: "TARGETID"
+
+    weights:
+      total: "WEIGHT * WEIGHT_FKP"
+
+    provenance: "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/"
+
+  desi_edr_qso:
+    survey: "DESI"
+    release: "EDR"
+    version: "v2.0"
+    tracer: "QSO"
+    description: "DESI Early Data Release QSO sample"
+
+    regions:
+      N:
+        data: "desi/edr/QSO/v2.0/QSO_N_clustering.dat.fits"
+        randoms_pattern: "desi/edr/QSO/v2.0/QSO_N_{i}_clustering.ran.fits"
+        n_randoms: 18
+      S:
+        data: "desi/edr/QSO/v2.0/QSO_S_clustering.dat.fits"
+        randoms_pattern: "desi/edr/QSO/v2.0/QSO_S_{i}_clustering.ran.fits"
+        n_randoms: 18
+
+    format: "fits"
+    z_range: [0.8, 2.1]
+    z_eff: 1.4
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight: "WEIGHT"
+      weight_fkp: "WEIGHT_FKP"
+      nz: "NZ"
+      id: "TARGETID"
+
+    weights:
+      total: "WEIGHT * WEIGHT_FKP"
+
+    provenance: "https://data.desi.lbl.gov/public/edr/vac/edr/lss/v2.0/"
+
+# ------------------------------------------------------------------------------
+# DESI DR1 Catalogs
+# ------------------------------------------------------------------------------
+  desi_dr1_lrg:
+    survey: "DESI"
+    release: "DR1"
+    version: "v1.5"
+    tracer: "LRG"
+    description: "DESI Data Release 1 LRG sample"
+
+    regions:
+      NGC:
+        data: "desi/dr1/LRG/v1.5/LRG_NGC_clustering.dat.fits"
+        randoms_pattern: "desi/dr1/LRG/v1.5/LRG_NGC_{i}_clustering.ran.fits"
+        n_randoms: 18
+      SGC:
+        data: "desi/dr1/LRG/v1.5/LRG_SGC_clustering.dat.fits"
+        randoms_pattern: "desi/dr1/LRG/v1.5/LRG_SGC_{i}_clustering.ran.fits"
+        n_randoms: 18
+
+    format: "fits"
+    z_range: [0.4, 1.1]
+    z_bins:
+      - {z_min: 0.4, z_max: 0.6, z_eff: 0.51}
+      - {z_min: 0.6, z_max: 0.8, z_eff: 0.71}
+      - {z_min: 0.8, z_max: 1.1, z_eff: 0.93}
+
+    columns:
+      ra: "RA"
+      dec: "DEC"
+      z: "Z"
+      weight: "WEIGHT"
+      weight_sys: "WEIGHT_SYS"
+      weight_comp: "WEIGHT_COMP"
+      weight_zfail: "WEIGHT_ZFAIL"
+      weight_fkp: "WEIGHT_FKP"
+      nz: "NZ"
+      id: "TARGETID"
+
+    weights:
+      total: "WEIGHT * WEIGHT_FKP"
+      clustering: "WEIGHT"
+      decomposed: "WEIGHT_SYS * WEIGHT_COMP * WEIGHT_ZFAIL"
+
+    provenance: "https://data.desi.lbl.gov/public/dr1/survey/catalogs/dr1/LSS/iron/LSScats/v1.5/"
+
+# ------------------------------------------------------------------------------
+# Mock Catalogs
+# ------------------------------------------------------------------------------
+mocks:
+  eboss_ezmocks:
+    survey: "eBOSS"
+    release: "DR16"
+    type: "EZmocks"
+    n_available: 1000
+    path_pattern: "mocks/eboss/EZmock_LRGpCMASS_{region}_{i:04d}.fits"
+    regions: ["NGC", "SGC"]
+    description: "Official eBOSS EZmock realizations"
+    download_url: "https://data.sdss.org/sas/dr16/eboss/lss/catalogs/EZmocks/"
+
+  desi_abacus:
+    survey: "DESI"
+    release: "EDR"
+    type: "AbacusSummit"
+    n_available: 25
+    path_pattern: "mocks/desi/AbacusSummit_{tracer}_{i:03d}.fits"
+    description: "AbacusSummit mock realizations for DESI"

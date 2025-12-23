@@ -1,0 +1,52 @@
+# ==============================================================================
+# Conda Environment for BAO Environment-Overlap Analysis
+# ==============================================================================
+# Create with: conda env create -f environment.yaml
+# Activate with: conda activate bao_overlap
+# ==============================================================================
+
+name: bao_overlap
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Core Python
+  - python>=3.10
+  - pip
+
+  # Scientific computing
+  - numpy>=1.24
+  - scipy>=1.10
+  - pandas>=2.0
+
+  # Astronomy
+  - astropy>=5.0
+  - fitsio>=1.1
+  - healpy>=1.16
+
+  # Correlation functions
+  - corrfunc>=2.4
+
+  # Plotting
+  - matplotlib>=3.7
+  - seaborn>=0.12
+
+  # MCMC (optional, for Bayesian inference)
+  - emcee>=3.1
+
+  # Configuration
+  - pyyaml>=6.0
+  - toml>=0.10
+
+  # Progress bars
+  - tqdm>=4.65
+
+  # Testing
+  - pytest>=7.0
+  - pytest-cov>=4.0
+
+  # Pip packages
+  - pip:
+    - cryptography>=41.0  # For blinding encryption
+    - pyarrow>=14.0  # For parquet files
