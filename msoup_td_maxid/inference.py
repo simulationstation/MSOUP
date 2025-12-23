@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -10,7 +11,16 @@ import numpy as np
 from msoup_purist_closure.model import h_inferred_from_kernel
 
 from .config import MaxIDConfig
-from .diagnostics import PPCEntry, dominance_kill_table, info_fractions, logsumexp, loo_diagnostics, weighted_median
+from .diagnostics import (
+    PPCEntry,
+    LOOEntry,
+    dominance_kill_table,
+    edge_masses,
+    gaussian_two_tailed_prob,
+    info_fractions,
+    logsumexp,
+    weighted_median,
+)
 from .io import LensPosterior, load_td_master
 from .likelihoods import histogram_logpdf_from_samples, robust_residual_loglike
 from .model import D_dt_pred, f0_from_delta_m
@@ -122,11 +132,84 @@ def _ppc_entries(lenses: List[LensPosterior], delta_map: float, cfg: MaxIDConfig
             sigma = np.nan
         resid = (lens.value if lens.value is not None else pred) - pred
         pull = float(resid / sigma) if sigma and np.isfinite(sigma) else np.nan
-        entries.append(PPCEntry(lens_id=lens.lens_id, residual=float(resid), sigma=float(sigma) if np.isfinite(sigma) else np.nan, pull=pull, support=lens.support))
+        tail = gaussian_two_tailed_prob(pull) if np.isfinite(pull) else math.nan  # type: ignore[name-defined]
+        entries.append(
+            PPCEntry(
+                lens_id=lens.lens_id,
+                residual=float(resid),
+                sigma=float(sigma) if np.isfinite(sigma) else np.nan,
+                pull=pull,
+                support=lens.support,
+                tail_prob=tail,
+            )
+        )
     return entries
 
 
-def run_inference(cfg: MaxIDConfig, mode: str = "base") -> Dict[str, object]:
+def _loo_weights(total_loglike: np.ndarray, leave_loglike: np.ndarray) -> np.ndarray:
+    loo_logw = total_loglike - leave_loglike
+    norm = logsumexp(loo_logw)
+    w = np.exp(loo_logw - norm)
+    w = np.where(np.isfinite(w), w, 0.0)
+    if w.sum() == 0:
+        w = np.ones_like(w) / w.size
+    return w / w.sum()
+
+
+def _exact_loo(
+    lenses: List[LensPosterior],
+    delta_grid: np.ndarray,
+    loglike_matrix: np.ndarray,
+    full_weights: np.ndarray,
+    cfg: MaxIDConfig,
+) -> List[LOOEntry]:
+    total = np.sum(loglike_matrix, axis=0)
+    full_med = weighted_median(delta_grid, full_weights)
+    entries: List[LOOEntry] = []
+    for idx, lens in enumerate(lenses):
+        w = _loo_weights(total, loglike_matrix[idx])
+        summary = _posterior_summary(delta_grid, w)
+        f0_grid = f0_from_delta_m(delta_grid, cfg.omega_m0, cfg.omega_L0)
+        f0_summary = _posterior_summary(f0_grid, w)
+        entries.append(
+            LOOEntry(
+                lens_id=lens.lens_id,
+                pareto_k=math.nan,
+                delta_m_shift=summary["median"] - full_med,
+                median_loo=summary["median"],
+                median_full=full_med,
+                low68=summary["low68"],
+                high68=summary["high68"],
+                f0_median=f0_summary["median"],
+            )
+        )
+    return entries
+
+
+def _write_loo_csv(entries: List[LOOEntry] | List[dict], output_dir: Path, mode: str) -> Path:
+    import csv
+
+    csv_path = output_dir / f"loo_refits_{mode}.csv"
+    fieldnames = ["lens_id", "loo_delta_m_median", "loo_delta_m_low68", "loo_delta_m_high68", "loo_delta_m_shift", "loo_f0_median"]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in entries:
+            row = asdict(entry) if hasattr(entry, "__dict__") else entry
+            writer.writerow(
+                {
+                    "lens_id": row["lens_id"],
+                    "loo_delta_m_median": row["median_loo"],
+                    "loo_delta_m_low68": row.get("low68"),
+                    "loo_delta_m_high68": row.get("high68"),
+                    "loo_delta_m_shift": row["delta_m_shift"],
+                    "loo_f0_median": row.get("f0_median"),
+                }
+            )
+    return csv_path
+
+
+def run_inference(cfg: MaxIDConfig, mode: str = "base", write_loo: bool = True) -> Dict[str, object]:
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"Unsupported mode {mode}")
     lenses = load_td_master(cfg)
@@ -135,6 +218,8 @@ def run_inference(cfg: MaxIDConfig, mode: str = "base") -> Dict[str, object]:
     results: Dict[str, object] = {}
     output_dir = Path(cfg.paths.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    mode_dir = output_dir / mode
+    mode_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         delta_grid = _delta_grid(cfg)
@@ -155,6 +240,14 @@ def run_inference(cfg: MaxIDConfig, mode: str = "base") -> Dict[str, object]:
         summary = _posterior_summary(delta_grid, weights)
         f0_grid = f0_from_delta_m(delta_grid, cfg.omega_m0, cfg.omega_L0)
         f0_summary = _posterior_summary(f0_grid, weights)
+        edge_low, edge_high = edge_masses(weights)
+        map_idx = int(np.argmax(weights))
+        bound_truncation_flag = bool(
+            (edge_low > 0.01)
+            or (edge_high > 0.01)
+            or (map_idx <= 1)
+            or (map_idx >= len(delta_grid) - 2)
+        )
 
         if len(lenses) > 0:
             info_frac = info_fractions(loglike_matrix)
@@ -165,10 +258,13 @@ def run_inference(cfg: MaxIDConfig, mode: str = "base") -> Dict[str, object]:
             info_frac = [float(0.5 * (a + b)) for a, b in zip(info_frac, sigma_strength)]
         else:
             info_frac = []
-        loo = loo_diagnostics([l.lens_id for l in lenses], delta_grid, loglike_matrix, weights) if len(lenses) > 0 else []
+        loo_entries: List[LOOEntry] = []
+        if write_loo and len(lenses) > 0:
+            loo_entries = _exact_loo(lenses, delta_grid, loglike_matrix, weights, cfg)
+            _write_loo_csv(loo_entries, mode_dir, mode)
         delta_map = float(delta_grid[np.argmax(weights)])
         ppc = _ppc_entries(lenses, delta_map, cfg)
-        kill = dominance_kill_table(info_frac, loo, ppc, summary.get("sigma", np.nan))
+        kill = dominance_kill_table(info_frac, loo_entries, ppc, summary.get("sigma", np.nan))
         verdict = "ROBUST" if all(kill.values()) else "DOMINATED"
 
         results = {
@@ -177,8 +273,12 @@ def run_inference(cfg: MaxIDConfig, mode: str = "base") -> Dict[str, object]:
             "weights": weights.tolist(),
             "summary": summary,
             "f0_summary": f0_summary,
+            "edge_mass_low": edge_low,
+            "edge_mass_high": edge_high,
+            "bound_truncation_flag": bound_truncation_flag,
             "info_fraction": [{"lens_id": l.lens_id, "fraction": float(f)} for l, f in zip(lenses, info_frac)],
-            "loo": [asdict(entry) for entry in loo],
+            "loo": [asdict(entry) for entry in loo_entries],
+            "loo_refits": [asdict(entry) for entry in loo_entries],
             "ppc": [asdict(entry) for entry in ppc],
             "kill_table": kill,
             "verdict": verdict,
