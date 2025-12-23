@@ -1,0 +1,25 @@
+paths:
+  td_master: data_ignored/td_master.csv
+  posterior_dir: data_ignored/td_posteriors
+  output_dir: results/td_maxid
+priors:
+  delta_m_min: -0.5
+  delta_m_max: 0.6
+  delta_m_points: 161
+  tau0: 0.05
+  student_df: 6.0
+  sigma_floor_frac: 0.0
+  mixture_eps: 0.1
+  mixture_scale: 6.0
+compute:
+  max_workers: 1
+  max_rss_gb: 9.0
+  rss_check_interval: 5
+  bandwidth: null
+  seed: 1234
+  chunk_size: 8000
+h_early: 67.0
+omega_m0: 0.315
+omega_L0: 0.685
+summary_only: false
+posterior_column: D_dt
