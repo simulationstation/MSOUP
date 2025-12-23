@@ -115,6 +115,11 @@ figures/
 *.gz
 *.zip
 
+# Globus Connect Personal
+globusconnectpersonal-*/
+globusconnectpersonal-*.tgz
+*.tgz:Zone.Identifier
+
 # OS
 .DS_Store
 Thumbs.db

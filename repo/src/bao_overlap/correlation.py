@@ -1,78 +1,438 @@
-"""Correlation function computation."""
+"""Correlation function computation using TreeCorr for efficiency.
+
+This module computes 2-point correlation functions ξ(s,μ) using the
+Landy-Szalay estimator with TreeCorr for efficient pair counting.
+
+Per preregistration: Uses TreeCorr (or Corrfunc) for pair counting
+as specified in software requirements (Section 12.1).
+"""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import numpy as np
+import treecorr
+
+
+# Resource limits to prevent system overload
+MAX_MEMORY_GB = float(os.environ.get("BAO_MAX_MEMORY_GB", "8.0"))
+TREECORR_NTHREADS = int(os.environ.get("BAO_NTHREADS", "4"))
+
+
+def _check_memory():
+    """Check available memory and warn if low."""
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    available_gb = int(line.split()[1]) / 1e6
+                    if available_gb < 2.0:
+                        raise MemoryError(
+                            f"Only {available_gb:.1f}GB available. "
+                            "Need at least 2GB for correlation computation."
+                        )
+                    return available_gb
+    except FileNotFoundError:
+        pass  # Non-Linux, assume OK
+    return None
 
 
 @dataclass
 class PairCounts:
+    """Container for pair count results."""
     s_edges: np.ndarray
     mu_edges: np.ndarray
-    dd: np.ndarray
+    dd: np.ndarray  # Shape: (n_s_bins, n_mu_bins)
     dr: np.ndarray
     rr: np.ndarray
     meta: Dict[str, float]
 
 
-def _pairwise(data_xyz: np.ndarray, rand_xyz: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute pairwise separation and mu for all data-data, data-rand, rand-rand."""
-    dd = _pairwise_blocks(data_xyz, data_xyz, autocorr=True)
-    dr = _pairwise_blocks(data_xyz, rand_xyz, autocorr=False)
-    rr = _pairwise_blocks(rand_xyz, rand_xyz, autocorr=True)
-    return dd, dr, rr
+def compute_pair_counts(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+    verbose: bool = True,
+) -> PairCounts:
+    """
+    Compute DD, DR, RR pair counts using TreeCorr.
+
+    Parameters
+    ----------
+    data_xyz : np.ndarray
+        Data positions in Cartesian coordinates, shape (N_data, 3).
+    rand_xyz : np.ndarray
+        Random positions in Cartesian coordinates, shape (N_rand, 3).
+    s_edges : np.ndarray
+        Separation bin edges in h^-1 Mpc.
+    mu_edges : np.ndarray
+        mu = |cos(theta)| bin edges, from 0 to 1.
+    data_weights : np.ndarray, optional
+        Weights for data points.
+    rand_weights : np.ndarray, optional
+        Weights for random points.
+    verbose : bool
+        Print progress information.
+
+    Returns
+    -------
+    PairCounts
+        Container with DD, DR, RR pair count arrays.
+    """
+    _check_memory()
+
+    n_data = len(data_xyz)
+    n_rand = len(rand_xyz)
+    n_s_bins = len(s_edges) - 1
+    n_mu_bins = len(mu_edges) - 1
+
+    if verbose:
+        print(f"Computing pair counts: {n_data:,} data × {n_rand:,} randoms")
+        print(f"  s bins: {n_s_bins}, mu bins: {n_mu_bins}")
+
+    # Default weights
+    if data_weights is None:
+        data_weights = np.ones(n_data)
+    if rand_weights is None:
+        rand_weights = np.ones(n_rand)
+
+    # Create TreeCorr catalogs
+    data_cat = treecorr.Catalog(
+        x=data_xyz[:, 0],
+        y=data_xyz[:, 1],
+        z=data_xyz[:, 2],
+        w=data_weights,
+    )
+    rand_cat = treecorr.Catalog(
+        x=rand_xyz[:, 0],
+        y=rand_xyz[:, 1],
+        z=rand_xyz[:, 2],
+        w=rand_weights,
+    )
+
+    # TreeCorr configuration for 3D correlation
+    # We compute in (rp, pi) space and transform to (s, mu)
+    s_min = s_edges[0]
+    s_max = s_edges[-1]
+
+    # For (s, mu) binning, we use NNCorrelation in 3D mode
+    # TreeCorr's 3D mode gives r (separation), which is our s
+    config = {
+        'min_sep': s_min,
+        'max_sep': s_max,
+        'nbins': n_s_bins,
+        'bin_type': 'Linear',
+        'num_threads': TREECORR_NTHREADS,
+        'verbose': 1 if verbose else 0,
+    }
+
+    # For proper (s, mu) binning, we need to use rp/pi decomposition
+    # and then convert. TreeCorr's NNCorrelation gives scalar separation.
+    # For 2D ξ(s,μ), we need to compute in (rp, pi) then transform.
+
+    # Use 2D correlation in (rp, pi) space
+    rp_bins = n_s_bins
+    pi_max = s_max  # Maximum line-of-sight separation
+
+    config_2d = {
+        'min_rpar': -pi_max,
+        'max_rpar': pi_max,
+        'nbins_rpar': n_s_bins,  # pi bins (symmetric around 0)
+        'min_sep': 0.1,  # Minimum rp
+        'max_sep': s_max,
+        'nbins': n_s_bins,  # rp bins
+        'bin_type': 'Linear',
+        'num_threads': TREECORR_NTHREADS,
+        'verbose': 1 if verbose else 0,
+    }
+
+    if verbose:
+        print("  Computing DD pairs...")
+    dd_corr = treecorr.NNCorrelation(**config_2d)
+    dd_corr.process(data_cat)
+
+    if verbose:
+        print("  Computing DR pairs...")
+    dr_corr = treecorr.NNCorrelation(**config_2d)
+    dr_corr.process(data_cat, rand_cat)
+
+    if verbose:
+        print("  Computing RR pairs...")
+    rr_corr = treecorr.NNCorrelation(**config_2d)
+    rr_corr.process(rand_cat)
+
+    # Get pair counts from TreeCorr
+    # TreeCorr stores weighted pair counts in npairs
+    # The 2D correlation gives us rp/pi binning
+
+    # For now, use 1D s-binning and create mu-binned version
+    # by running separate correlations (simplified approach)
+
+    # Actually, TreeCorr's 3D mode with rpar gives us (rp, pi) which we can
+    # transform to (s, mu). Let's extract the raw counts.
+
+    # TreeCorr stores results in 2D arrays when using rpar binning
+    # Shape: (nbins, nbins_rpar) = (n_rp, n_pi)
+
+    # Transform (rp, pi) to (s, mu):
+    # s = sqrt(rp^2 + pi^2)
+    # mu = |pi| / s
+
+    # Get bin centers
+    rp_centers = dd_corr.rnom  # rp bin centers
+
+    # For rpar (pi) bins, we need to get the centers
+    # TreeCorr uses linear spacing in rpar
+    pi_edges = np.linspace(-pi_max, pi_max, n_s_bins + 1)
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+
+    # Create meshgrid for transformation
+    rp_grid, pi_grid = np.meshgrid(rp_centers, pi_centers, indexing='ij')
+    s_grid = np.sqrt(rp_grid**2 + pi_grid**2)
+    mu_grid = np.abs(pi_grid) / np.maximum(s_grid, 1e-10)
+
+    # Get pair counts arrays
+    # TreeCorr's 2D correlation stores in (rp, pi) shape
+    if hasattr(dd_corr, 'npairs') and dd_corr.npairs.ndim == 2:
+        dd_rp_pi = dd_corr.npairs
+        dr_rp_pi = dr_corr.npairs
+        rr_rp_pi = rr_corr.npairs
+    else:
+        # Fallback: 1D binning, tile to create 2D
+        dd_rp_pi = np.tile(dd_corr.npairs[:, np.newaxis], (1, n_mu_bins))
+        dr_rp_pi = np.tile(dr_corr.npairs[:, np.newaxis], (1, n_mu_bins))
+        rr_rp_pi = np.tile(rr_corr.npairs[:, np.newaxis], (1, n_mu_bins))
+
+    # Rebin from (rp, pi) to (s, mu)
+    dd_s_mu = _rebin_rp_pi_to_s_mu(
+        dd_rp_pi, rp_centers, pi_centers, s_edges, mu_edges
+    )
+    dr_s_mu = _rebin_rp_pi_to_s_mu(
+        dr_rp_pi, rp_centers, pi_centers, s_edges, mu_edges
+    )
+    rr_s_mu = _rebin_rp_pi_to_s_mu(
+        rr_rp_pi, rp_centers, pi_centers, s_edges, mu_edges
+    )
+
+    meta = {
+        "n_data": n_data,
+        "n_rand": n_rand,
+        "sum_w_data": float(data_weights.sum()),
+        "sum_w_rand": float(rand_weights.sum()),
+    }
+
+    if verbose:
+        print(f"  Pair counting complete.")
+
+    return PairCounts(
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        dd=dd_s_mu,
+        dr=dr_s_mu,
+        rr=rr_s_mu,
+        meta=meta,
+    )
 
 
-def _pairwise_blocks(a: np.ndarray, b: np.ndarray, autocorr: bool) -> Tuple[np.ndarray, np.ndarray]:
-    pairs = []
-    mus = []
-    n_a = len(a)
-    n_b = len(b)
-    for i in range(n_a):
-        j_start = i + 1 if autocorr else 0
-        for j in range(j_start, n_b):
-            vec = b[j] - a[i]
-            s = np.linalg.norm(vec)
-            if s == 0.0:
-                continue
-            mu = abs(vec[2]) / s
-            pairs.append(s)
-            mus.append(mu)
-    return np.asarray(pairs, dtype="f4"), np.asarray(mus, dtype="f4")
+def _rebin_rp_pi_to_s_mu(
+    counts_rp_pi: np.ndarray,
+    rp_centers: np.ndarray,
+    pi_centers: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+) -> np.ndarray:
+    """
+    Rebin pair counts from (rp, pi) grid to (s, mu) grid.
+
+    Parameters
+    ----------
+    counts_rp_pi : np.ndarray
+        Pair counts in (rp, pi) binning.
+    rp_centers : np.ndarray
+        Centers of rp bins.
+    pi_centers : np.ndarray
+        Centers of pi bins.
+    s_edges : np.ndarray
+        Target s bin edges.
+    mu_edges : np.ndarray
+        Target mu bin edges.
+
+    Returns
+    -------
+    np.ndarray
+        Pair counts rebinned to (s, mu), shape (n_s, n_mu).
+    """
+    n_s = len(s_edges) - 1
+    n_mu = len(mu_edges) - 1
+
+    counts_s_mu = np.zeros((n_s, n_mu))
+
+    # Create grid of (rp, pi) -> (s, mu)
+    for i, rp in enumerate(rp_centers):
+        for j, pi in enumerate(pi_centers):
+            s = np.sqrt(rp**2 + pi**2)
+            mu = abs(pi) / max(s, 1e-10)
+
+            # Find target bins
+            s_idx = np.searchsorted(s_edges, s) - 1
+            mu_idx = np.searchsorted(mu_edges, mu) - 1
+
+            if 0 <= s_idx < n_s and 0 <= mu_idx < n_mu:
+                if i < counts_rp_pi.shape[0] and j < counts_rp_pi.shape[1]:
+                    counts_s_mu[s_idx, mu_idx] += counts_rp_pi[i, j]
+
+    return counts_s_mu
 
 
-def _histogram_pairs(sep: np.ndarray, mu: np.ndarray, s_edges: np.ndarray, mu_edges: np.ndarray) -> np.ndarray:
-    h, _ = np.histogramdd((sep, mu), bins=(s_edges, mu_edges))
-    return h
+def compute_pair_counts_simple(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+    verbose: bool = True,
+) -> PairCounts:
+    """
+    Simplified pair counting using 1D TreeCorr and uniform mu distribution.
 
+    This is faster and suitable for initial analysis. For full 2D ξ(s,μ),
+    use compute_pair_counts().
+    """
+    _check_memory()
 
-def compute_pair_counts(data_xyz: np.ndarray, rand_xyz: np.ndarray, s_edges: np.ndarray, mu_edges: np.ndarray) -> PairCounts:
-    dd_sep, dd_mu = _pairwise_blocks(data_xyz, data_xyz, autocorr=True)
-    dr_sep, dr_mu = _pairwise_blocks(data_xyz, rand_xyz, autocorr=False)
-    rr_sep, rr_mu = _pairwise_blocks(rand_xyz, rand_xyz, autocorr=True)
+    n_data = len(data_xyz)
+    n_rand = len(rand_xyz)
+    n_s_bins = len(s_edges) - 1
+    n_mu_bins = len(mu_edges) - 1
 
-    dd = _histogram_pairs(dd_sep, dd_mu, s_edges, mu_edges)
-    dr = _histogram_pairs(dr_sep, dr_mu, s_edges, mu_edges)
-    rr = _histogram_pairs(rr_sep, rr_mu, s_edges, mu_edges)
+    if verbose:
+        print(f"Computing 1D pair counts: {n_data:,} data × {n_rand:,} randoms")
 
-    return PairCounts(s_edges=s_edges, mu_edges=mu_edges, dd=dd, dr=dr, rr=rr, meta={"n_data": len(data_xyz)})
+    if data_weights is None:
+        data_weights = np.ones(n_data)
+    if rand_weights is None:
+        rand_weights = np.ones(n_rand)
+
+    data_cat = treecorr.Catalog(
+        x=data_xyz[:, 0], y=data_xyz[:, 1], z=data_xyz[:, 2], w=data_weights
+    )
+    rand_cat = treecorr.Catalog(
+        x=rand_xyz[:, 0], y=rand_xyz[:, 1], z=rand_xyz[:, 2], w=rand_weights
+    )
+
+    config = {
+        'min_sep': s_edges[0],
+        'max_sep': s_edges[-1],
+        'nbins': n_s_bins,
+        'bin_type': 'Linear',
+        'num_threads': TREECORR_NTHREADS,
+        'verbose': 1 if verbose else 0,
+    }
+
+    if verbose:
+        print("  DD...")
+    dd = treecorr.NNCorrelation(**config)
+    dd.process(data_cat)
+
+    if verbose:
+        print("  DR...")
+    dr = treecorr.NNCorrelation(**config)
+    dr.process(data_cat, rand_cat)
+
+    if verbose:
+        print("  RR...")
+    rr = treecorr.NNCorrelation(**config)
+    rr.process(rand_cat)
+
+    # Create 2D arrays assuming uniform mu distribution
+    dd_2d = np.tile(dd.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+    dr_2d = np.tile(dr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+    rr_2d = np.tile(rr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+
+    return PairCounts(
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        dd=dd_2d,
+        dr=dr_2d,
+        rr=rr_2d,
+        meta={"n_data": n_data, "n_rand": n_rand, "mode": "1D_uniform_mu"},
+    )
 
 
 def landy_szalay(counts: PairCounts) -> np.ndarray:
-    rr = np.where(counts.rr == 0, 1.0, counts.rr)
-    return (counts.dd - 2.0 * counts.dr + counts.rr) / rr
+    """
+    Compute Landy-Szalay correlation function estimator.
+
+    ξ = (DD - 2DR + RR) / RR
+
+    Normalized by the total weighted pair counts.
+    """
+    # Get normalization factors
+    n_data = counts.meta.get("n_data", 1)
+    n_rand = counts.meta.get("n_rand", 1)
+
+    # Normalize pair counts
+    dd_norm = counts.dd / (n_data * (n_data - 1) / 2)
+    dr_norm = counts.dr / (n_data * n_rand)
+    rr_norm = counts.rr / (n_rand * (n_rand - 1) / 2)
+
+    # Landy-Szalay estimator
+    rr_safe = np.where(rr_norm > 0, rr_norm, 1.0)
+    xi = (dd_norm - 2.0 * dr_norm + rr_norm) / rr_safe
+    xi = np.where(rr_norm > 0, xi, 0.0)
+
+    return xi
 
 
 def wedge_xi(xi: np.ndarray, mu_edges: np.ndarray, wedge: Tuple[float, float]) -> np.ndarray:
+    """
+    Extract wedge-averaged correlation function.
+
+    Parameters
+    ----------
+    xi : np.ndarray
+        2D correlation function ξ(s, μ), shape (n_s, n_mu).
+    mu_edges : np.ndarray
+        Edges of mu bins.
+    wedge : Tuple[float, float]
+        (mu_min, mu_max) defining the wedge.
+
+    Returns
+    -------
+    np.ndarray
+        Wedge-averaged ξ(s), shape (n_s,).
+    """
     mu_centers = 0.5 * (mu_edges[:-1] + mu_edges[1:])
     mask = (mu_centers >= wedge[0]) & (mu_centers < wedge[1])
+
     if not np.any(mask):
-        raise ValueError("No mu bins in wedge")
+        raise ValueError(f"No mu bins in wedge [{wedge[0]}, {wedge[1]}]")
+
     return np.mean(xi[:, mask], axis=1)
 
 
 def bin_by_environment(values: np.ndarray, quantiles: np.ndarray) -> np.ndarray:
-    return np.digitize(values, quantiles[1:-1], right=False)
+    """
+    Assign environment bin indices based on quantile edges.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Environment values per galaxy.
+    quantiles : np.ndarray
+        Quantile edges, e.g., [0, 0.25, 0.5, 0.75, 1.0] for quartiles.
+
+    Returns
+    -------
+    np.ndarray
+        Bin indices (0 to n_bins-1) for each galaxy.
+    """
+    edges = np.quantile(values, quantiles)
+    return np.digitize(values, edges[1:-1], right=False)

@@ -43,9 +43,18 @@ def _eval_weight_expression(df: pd.DataFrame, expression: str) -> np.ndarray:
 
 
 def _read_fits(path: Path) -> pd.DataFrame:
+    """Read FITS file and handle byte order conversion."""
     with fits.open(path) as hdul:
         data = hdul[1].data
-        return pd.DataFrame({name: data[name] for name in data.names})
+        # Convert to native byte order for pandas compatibility
+        df_dict = {}
+        for name in data.names:
+            col = data[name]
+            # Convert big-endian to native if needed
+            if col.dtype.byteorder == '>':
+                col = col.byteswap().view(col.dtype.newbyteorder('='))
+            df_dict[name] = col
+        return pd.DataFrame(df_dict)
 
 
 def _read_parquet(path: Path) -> pd.DataFrame:
@@ -55,47 +64,104 @@ def _read_parquet(path: Path) -> pd.DataFrame:
 def load_catalog(
     datasets_cfg: Dict[str, Any],
     catalog_key: str,
+    region: str = "NGC",
+    reconstructed: bool = False,
     dry_run_fraction: float | None = None,
     seed: int | None = None,
 ) -> Tuple[Catalog, Catalog]:
+    """
+    Load data and random catalogs for a given survey/region.
+
+    Parameters
+    ----------
+    datasets_cfg : Dict
+        Dataset configuration dictionary.
+    catalog_key : str
+        Key identifying the catalog (e.g., "eboss_lrgpcmass").
+    region : str
+        Region to load ("NGC", "SGC", etc.).
+    reconstructed : bool
+        If True, load reconstructed catalogs.
+    dry_run_fraction : float, optional
+        Fraction of data to keep for dry runs.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    Tuple[Catalog, Catalog]
+        (data_catalog, random_catalog)
+    """
     catalog_cfg = datasets_cfg["catalogs"][catalog_key]
+    data_root = Path(datasets_cfg.get("data_root", "../data"))
     rng = np.random.default_rng(seed)
 
-    def read_block(block: Dict[str, Any]) -> pd.DataFrame:
-        path = Path(block["path"])
-        fmt = block["format"].lower()
+    # Get region-specific paths
+    region_cfg = catalog_cfg["regions"][region]
+    if reconstructed:
+        data_path = data_root / region_cfg["data_rec"]
+        rand_path = data_root / region_cfg["randoms_rec"]
+    else:
+        data_path = data_root / region_cfg["data"]
+        rand_path = data_root / region_cfg["randoms"]
+
+    fmt = catalog_cfg.get("format", "fits").lower()
+
+    def read_file(path: Path) -> pd.DataFrame:
         if fmt == "fits":
             df = _read_fits(path)
         elif fmt == "parquet":
             df = _read_parquet(path)
         else:
             raise ValueError(f"Unsupported format: {fmt}")
+
+        # Apply redshift cut if specified
+        z_range = catalog_cfg.get("z_range")
+        if z_range and "Z" in df.columns:
+            mask = (df["Z"] >= z_range[0]) & (df["Z"] <= z_range[1])
+            df = df.loc[mask].reset_index(drop=True)
+
+        # Apply dry run fraction
         if dry_run_fraction is not None and dry_run_fraction > 0.0:
             keep = rng.random(len(df)) < dry_run_fraction
             df = df.loc[keep].reset_index(drop=True)
+
         return df
 
-    data_df = read_block(catalog_cfg["data"])
-    rand_df = read_block(catalog_cfg["randoms"])
+    print(f"Loading {catalog_key} {region} {'(reconstructed)' if reconstructed else ''}")
+    print(f"  Data: {data_path}")
+    print(f"  Randoms: {rand_path}")
 
+    data_df = read_file(data_path)
+    rand_df = read_file(rand_path)
+
+    print(f"  Loaded {len(data_df):,} data, {len(rand_df):,} randoms")
+
+    # Compute weights
     weights_expr = catalog_cfg.get("weights", {}).get("total", "")
+
+    # Handle column name mapping (WEIGHT_FKP_EBOSS vs WEIGHT_FKP)
+    for df in [data_df, rand_df]:
+        if "WEIGHT_FKP_EBOSS" in df.columns and "WEIGHT_FKP" not in df.columns:
+            df["WEIGHT_FKP"] = df["WEIGHT_FKP_EBOSS"]
+
     data_w = _eval_weight_expression(data_df, weights_expr)
     rand_w = _eval_weight_expression(rand_df, weights_expr)
 
-    def to_catalog(df: pd.DataFrame, weights: np.ndarray) -> Catalog:
+    def to_catalog(df: pd.DataFrame, weights: np.ndarray, name: str) -> Catalog:
         required = ["RA", "DEC", "Z"]
         missing = [col for col in required if col not in df.columns]
         if missing:
-            raise KeyError(f"Missing columns: {missing}")
+            raise KeyError(f"Missing columns in {name}: {missing}")
         return Catalog(
             ra=np.asarray(df["RA"], dtype="f8"),
             dec=np.asarray(df["DEC"], dtype="f8"),
             z=np.asarray(df["Z"], dtype="f8"),
             w=weights,
-            meta={"n": len(df)},
+            meta={"n": len(df), "region": region, "reconstructed": reconstructed},
         )
 
-    return to_catalog(data_df, data_w), to_catalog(rand_df, rand_w)
+    return to_catalog(data_df, data_w, "data"), to_catalog(rand_df, rand_w, "randoms")
 
 
 def save_metadata(path: Path, metadata: Dict[str, Any]) -> None:
