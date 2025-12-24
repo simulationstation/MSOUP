@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Number of parallel workers
-N_JOBS = min(20, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
+N_JOBS = min(4, max(1, int(os.environ.get("BAO_N_JOBS", 4))))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:
@@ -36,6 +36,7 @@ from bao_overlap.correlation import (
     compute_pair_counts_by_environment,
     landy_szalay,
     parse_wedge_bounds,
+    PairCounts,
     wedge_xi,
 )
 from bao_overlap.covariance import (
@@ -524,76 +525,86 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         except:
             pass
 
-    # Compute combined counts for all regions
-    status("  Computing combined region counts...", output_dir)
-    for region in regions:
-        region_payload = per_region[region]
-        counts_all_regions.append(
-            compute_pair_counts_simple(
-                region_payload["data_xyz"],
-                region_payload["rand_xyz"],
-                s_edges=s_edges,
-                mu_edges=mu_edges,
-                data_weights=region_payload["data"].w,
-                rand_weights=region_payload["randoms"].w,
-                verbose=False,
-            )
-        )
-        gc.collect()
-
-    counts_by_bin_combined = {}
-    for b in range(n_bins):
-        counts_by_bin_combined[b] = combine_pair_counts([counts_by_region[reg][b] for reg in regions])
-
-    combined_counts = combine_pair_counts(counts_all_regions)
-    xi_all = landy_szalay(combined_counts)
-    xi_tangential_all = wedge_xi(xi_all, mu_edges, tangential_bounds)
-    xi_radial_all = wedge_xi(xi_all, mu_edges, radial_bounds)
-
-    xi_tangential = np.zeros((n_bins, len(s_centers)))
-    xi_radial = np.zeros((n_bins, len(s_centers)))
-
-    for b in range(n_bins):
-        xi_bin = landy_szalay(counts_by_bin_combined[b])
-        xi_tangential[b] = wedge_xi(xi_bin, mu_edges, tangential_bounds)
-        xi_radial[b] = wedge_xi(xi_bin, mu_edges, radial_bounds)
-
-    dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
-    dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
-    rr_combined = np.stack([counts_by_bin_combined[b].rr for b in range(n_bins)], axis=0)
-
+    # Check if STAGE 2 outputs already exist (resume support)
     pair_counts_path = output_dir / "pair_counts_by_Ebin.npz"
-    save_payload: Dict[str, Any] = {
-        "dd": dd_combined,
-        "dr": dr_combined,
-        "rr": rr_combined,
-        "s_edges": s_edges,
-        "mu_edges": mu_edges,
-        "n_bins": np.array([n_bins], dtype=int),
-    }
-    for region in regions:
-        save_payload[f"dd_{region.lower()}"] = np.stack([counts_by_region[region][b].dd for b in range(n_bins)], axis=0)
-        save_payload[f"dr_{region.lower()}"] = np.stack([counts_by_region[region][b].dr for b in range(n_bins)], axis=0)
-        save_payload[f"rr_{region.lower()}"] = np.stack([counts_by_region[region][b].rr for b in range(n_bins)], axis=0)
-    np.savez(pair_counts_path, **save_payload)
-
     xi_wedge_path = output_dir / "xi_wedge_by_Ebin.npz"
-    np.savez(
-        xi_wedge_path,
-        xi_tangential=xi_tangential,
-        xi_radial=xi_radial,
-        xi_tangential_all=xi_tangential_all,
-        xi_radial_all=xi_radial_all,
-        s_centers=s_centers,
-        mu_wedge_defs=np.array([
-            tangential_bounds[0],
-            tangential_bounds[1],
-            radial_bounds[0],
-            radial_bounds[1],
-        ]),
-        E_bin_edges=env_bin_edges,
-        E_bin_centers=env_bin_centers,
-    )
+
+    if pair_counts_path.exists() and xi_wedge_path.exists():
+        status("  STAGE 2 outputs exist - loading saved results", output_dir)
+        xi_data = np.load(xi_wedge_path)
+        xi_tangential = xi_data["xi_tangential"]
+        xi_radial = xi_data["xi_radial"]
+        env_bin_edges = xi_data["E_bin_edges"]
+        env_bin_centers = xi_data["E_bin_centers"]
+    else:
+        # Compute combined counts for all regions
+        status("  Computing combined region counts...", output_dir)
+        for region in regions:
+            region_payload = per_region[region]
+            counts_all_regions.append(
+                compute_pair_counts_simple(
+                    region_payload["data_xyz"],
+                    region_payload["rand_xyz"],
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    data_weights=region_payload["data"].w,
+                    rand_weights=region_payload["randoms"].w,
+                    verbose=False,
+                )
+            )
+            gc.collect()
+
+        counts_by_bin_combined = {}
+        for b in range(n_bins):
+            counts_by_bin_combined[b] = combine_pair_counts([counts_by_region[reg][b] for reg in regions])
+
+        combined_counts = combine_pair_counts(counts_all_regions)
+        xi_all = landy_szalay(combined_counts)
+        xi_tangential_all = wedge_xi(xi_all, mu_edges, tangential_bounds)
+        xi_radial_all = wedge_xi(xi_all, mu_edges, radial_bounds)
+
+        xi_tangential = np.zeros((n_bins, len(s_centers)))
+        xi_radial = np.zeros((n_bins, len(s_centers)))
+
+        for b in range(n_bins):
+            xi_bin = landy_szalay(counts_by_bin_combined[b])
+            xi_tangential[b] = wedge_xi(xi_bin, mu_edges, tangential_bounds)
+            xi_radial[b] = wedge_xi(xi_bin, mu_edges, radial_bounds)
+
+        dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
+        dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
+        rr_combined = np.stack([counts_by_bin_combined[b].rr for b in range(n_bins)], axis=0)
+
+        save_payload: Dict[str, Any] = {
+            "dd": dd_combined,
+            "dr": dr_combined,
+            "rr": rr_combined,
+            "s_edges": s_edges,
+            "mu_edges": mu_edges,
+            "n_bins": np.array([n_bins], dtype=int),
+        }
+        for region in regions:
+            save_payload[f"dd_{region.lower()}"] = np.stack([counts_by_region[region][b].dd for b in range(n_bins)], axis=0)
+            save_payload[f"dr_{region.lower()}"] = np.stack([counts_by_region[region][b].dr for b in range(n_bins)], axis=0)
+            save_payload[f"rr_{region.lower()}"] = np.stack([counts_by_region[region][b].rr for b in range(n_bins)], axis=0)
+        np.savez(pair_counts_path, **save_payload)
+
+        np.savez(
+            xi_wedge_path,
+            xi_tangential=xi_tangential,
+            xi_radial=xi_radial,
+            xi_tangential_all=xi_tangential_all,
+            xi_radial_all=xi_radial_all,
+            s_centers=s_centers,
+            mu_wedge_defs=np.array([
+                tangential_bounds[0],
+                tangential_bounds[1],
+                radial_bounds[0],
+                radial_bounds[1],
+            ]),
+            E_bin_edges=env_bin_edges,
+            E_bin_centers=env_bin_centers,
+        )
 
     cov_cfg = prereg["covariance"]
     cov_dir = output_dir / "covariance"
@@ -649,18 +660,26 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
         # Precompute RR once with all randoms (approximation for JK efficiency)
         # The leave-one-out RR variation is small (~1%) and negligible for covariance
-        status("  Precomputing RR with all randoms...", output_dir)
-        rr_precompute = compute_pair_counts_simple(
-            rand_xyz_all,
-            rand_xyz_all,
-            s_edges=s_edges,
-            mu_edges=mu_edges,
-            data_weights=rand_w_all,
-            rand_weights=rand_w_all,
-            verbose=False,
-        )
-        precomputed_rr = rr_precompute.rr
-        status(f"  RR precomputed (shape {precomputed_rr.shape})", output_dir)
+        rr_checkpoint_path = output_dir / "rr_precomputed.npy"
+
+        if rr_checkpoint_path.exists():
+            status("  Loading precomputed RR from checkpoint...", output_dir)
+            precomputed_rr = np.load(rr_checkpoint_path)
+            status(f"  RR loaded (shape {precomputed_rr.shape})", output_dir)
+        else:
+            status("  Precomputing RR with all randoms...", output_dir)
+            rr_precompute = compute_pair_counts_simple(
+                rand_xyz_all,
+                rand_xyz_all,
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                data_weights=rand_w_all,
+                rand_weights=rand_w_all,
+                verbose=False,
+            )
+            precomputed_rr = rr_precompute.rr
+            np.save(rr_checkpoint_path, precomputed_rr)
+            status(f"  RR precomputed and saved (shape {precomputed_rr.shape})", output_dir)
 
         # --- MEMORY FIX: Use streaming covariance instead of storing all JK vectors ---
         # Previous code stored jk_vectors list that grew each iteration.
