@@ -24,6 +24,7 @@ def test_environment_normalization():
         delta_threshold=0.5,
         min_volume=1,
         normalize_output=True,
+        normalization_method="mean_std",
         primary="E1",
     )
     assert env.per_pair.shape[0] == pairs.shape[0]

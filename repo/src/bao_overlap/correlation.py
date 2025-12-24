@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional
+from typing import Dict, Iterable, Tuple, Optional
 
 import numpy as np
 import treecorr
@@ -101,6 +101,9 @@ def compute_pair_counts(
         data_weights = np.ones(n_data)
     if rand_weights is None:
         rand_weights = np.ones(n_rand)
+
+    data_weights = np.asarray(data_weights, dtype="f8")
+    rand_weights = np.asarray(rand_weights, dtype="f8")
 
     # Create TreeCorr catalogs
     data_cat = treecorr.Catalog(
@@ -225,6 +228,8 @@ def compute_pair_counts(
         "n_rand": n_rand,
         "sum_w_data": float(data_weights.sum()),
         "sum_w_rand": float(rand_weights.sum()),
+        "sum_w_data_sq": float(np.square(data_weights).sum()),
+        "sum_w_rand_sq": float(np.square(rand_weights).sum()),
     }
 
     if verbose:
@@ -362,7 +367,15 @@ def compute_pair_counts_simple(
         dd=dd_2d,
         dr=dr_2d,
         rr=rr_2d,
-        meta={"n_data": n_data, "n_rand": n_rand, "mode": "1D_uniform_mu"},
+        meta={
+            "n_data": n_data,
+            "n_rand": n_rand,
+            "sum_w_data": float(data_weights.sum()),
+            "sum_w_rand": float(rand_weights.sum()),
+            "sum_w_data_sq": float(np.square(data_weights).sum()),
+            "sum_w_rand_sq": float(np.square(rand_weights).sum()),
+            "mode": "1D_uniform_mu",
+        },
     )
 
 
@@ -374,14 +387,19 @@ def landy_szalay(counts: PairCounts) -> np.ndarray:
 
     Normalized by the total weighted pair counts.
     """
-    # Get normalization factors
-    n_data = counts.meta.get("n_data", 1)
-    n_rand = counts.meta.get("n_rand", 1)
+    # Get normalization factors (weighted pair counts)
+    sum_w_data = counts.meta.get("sum_w_data", counts.meta.get("n_data", 1))
+    sum_w_rand = counts.meta.get("sum_w_rand", counts.meta.get("n_rand", 1))
+    sum_w_data_sq = counts.meta.get("sum_w_data_sq", sum_w_data)
+    sum_w_rand_sq = counts.meta.get("sum_w_rand_sq", sum_w_rand)
 
-    # Normalize pair counts
-    dd_norm = counts.dd / (n_data * (n_data - 1) / 2)
-    dr_norm = counts.dr / (n_data * n_rand)
-    rr_norm = counts.rr / (n_rand * (n_rand - 1) / 2)
+    norm_dd = max((sum_w_data**2 - sum_w_data_sq) / 2.0, 1.0)
+    norm_rr = max((sum_w_rand**2 - sum_w_rand_sq) / 2.0, 1.0)
+    norm_dr = max(sum_w_data * sum_w_rand, 1.0)
+
+    dd_norm = counts.dd / norm_dd
+    dr_norm = counts.dr / norm_dr
+    rr_norm = counts.rr / norm_rr
 
     # Landy-Szalay estimator
     rr_safe = np.where(rr_norm > 0, rr_norm, 1.0)
@@ -416,6 +434,50 @@ def wedge_xi(xi: np.ndarray, mu_edges: np.ndarray, wedge: Tuple[float, float]) -
         raise ValueError(f"No mu bins in wedge [{wedge[0]}, {wedge[1]}]")
 
     return np.mean(xi[:, mask], axis=1)
+
+
+def parse_wedge_bounds(wedge_cfg: Dict[str, float]) -> Tuple[float, float]:
+    """Return numeric wedge bounds from config mapping."""
+    mu_min = wedge_cfg.get("mu_min")
+    mu_max = wedge_cfg.get("mu_max")
+    if not isinstance(mu_min, (int, float)) or not isinstance(mu_max, (int, float)):
+        raise ValueError("Wedge bounds must be numeric.")
+    return float(mu_min), float(mu_max)
+
+
+def combine_pair_counts(counts_list: Iterable[PairCounts]) -> PairCounts:
+    """Combine pair counts across regions by summing weighted pairs."""
+    counts_list = list(counts_list)
+    if not counts_list:
+        raise ValueError("No pair counts provided for combination.")
+
+    base = counts_list[0]
+    dd = np.zeros_like(base.dd)
+    dr = np.zeros_like(base.dr)
+    rr = np.zeros_like(base.rr)
+    meta = {"n_data": 0, "n_rand": 0, "sum_w_data": 0.0, "sum_w_rand": 0.0, "sum_w_data_sq": 0.0, "sum_w_rand_sq": 0.0}
+
+    for counts in counts_list:
+        if not np.allclose(counts.s_edges, base.s_edges) or not np.allclose(counts.mu_edges, base.mu_edges):
+            raise ValueError("Cannot combine pair counts with different binning.")
+        dd += counts.dd
+        dr += counts.dr
+        rr += counts.rr
+        meta["n_data"] += int(counts.meta.get("n_data", 0))
+        meta["n_rand"] += int(counts.meta.get("n_rand", 0))
+        meta["sum_w_data"] += float(counts.meta.get("sum_w_data", 0.0))
+        meta["sum_w_rand"] += float(counts.meta.get("sum_w_rand", 0.0))
+        meta["sum_w_data_sq"] += float(counts.meta.get("sum_w_data_sq", 0.0))
+        meta["sum_w_rand_sq"] += float(counts.meta.get("sum_w_rand_sq", 0.0))
+
+    return PairCounts(
+        s_edges=base.s_edges,
+        mu_edges=base.mu_edges,
+        dd=dd,
+        dr=dr,
+        rr=rr,
+        meta=meta,
+    )
 
 
 def bin_by_environment(values: np.ndarray, quantiles: np.ndarray) -> np.ndarray:
