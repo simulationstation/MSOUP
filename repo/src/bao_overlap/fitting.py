@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
+from scipy.optimize import minimize
 
 from .bao_template import bao_template
 
@@ -15,7 +16,7 @@ class FitResult:
     alpha: float
     sigma_alpha: float
     chi2: float
-    meta: Dict[str, float]
+    meta: Dict[str, Any]
 
 
 def _nuisance_design(s: np.ndarray, terms: List[str]) -> np.ndarray:
@@ -39,7 +40,8 @@ def fit_wedge(
     fit_range: Tuple[float, float],
     nuisance_terms: List[str],
     template_params: Dict[str, float],
-    alpha_grid: np.ndarray | None = None,
+    alpha_bounds: Tuple[float, float] = (0.8, 1.2),
+    optimizer: str = "L-BFGS-B",
 ) -> FitResult:
     mask = (s >= fit_range[0]) & (s <= fit_range[1])
     s_fit = s[mask]
@@ -47,11 +49,9 @@ def fit_wedge(
     cov_fit = covariance[np.ix_(mask, mask)]
     inv_cov = np.linalg.inv(cov_fit)
 
-    if alpha_grid is None:
-        alpha_grid = np.linspace(0.8, 1.2, 81)
+    nuisance = _nuisance_design(s_fit, nuisance_terms)
 
-    best = {"chi2": np.inf}
-    for alpha in alpha_grid:
+    def chi2_for_alpha(alpha: float) -> Tuple[float, np.ndarray]:
         template = bao_template(
             alpha * s_fit,
             r_d=template_params["r_d"],
@@ -61,7 +61,6 @@ def fit_wedge(
             h=template_params["h"],
             n_s=template_params["n_s"],
         )
-        nuisance = _nuisance_design(s_fit, nuisance_terms)
         design = np.column_stack([template, nuisance])
         lhs = design.T @ inv_cov @ design
         rhs = design.T @ inv_cov @ xi_fit
@@ -69,14 +68,38 @@ def fit_wedge(
         model = design @ coeffs
         resid = xi_fit - model
         chi2 = float(resid.T @ inv_cov @ resid)
-        if chi2 < best["chi2"]:
-            best = {"chi2": chi2, "alpha": alpha}
+        return chi2, coeffs
 
-    alpha_idx = np.argmin(np.abs(alpha_grid - best["alpha"]))
-    if 0 < alpha_idx < len(alpha_grid) - 1:
-        step = alpha_grid[1] - alpha_grid[0]
-        sigma_alpha = step
-    else:
-        sigma_alpha = alpha_grid[1] - alpha_grid[0]
+    def objective(alpha_arr: np.ndarray) -> float:
+        alpha_val = float(alpha_arr[0])
+        chi2, _ = chi2_for_alpha(alpha_val)
+        return chi2
 
-    return FitResult(alpha=best["alpha"], sigma_alpha=sigma_alpha, chi2=best["chi2"], meta={"n_bins": len(s_fit)})
+    initial = np.array([np.mean(alpha_bounds)])
+    result = minimize(
+        objective,
+        x0=initial,
+        method=optimizer,
+        bounds=[alpha_bounds],
+    )
+    alpha_hat = float(result.x[0])
+    chi2_min, coeffs = chi2_for_alpha(alpha_hat)
+
+    delta = 1.0e-3
+    chi2_plus, _ = chi2_for_alpha(min(alpha_bounds[1], alpha_hat + delta))
+    chi2_minus, _ = chi2_for_alpha(max(alpha_bounds[0], alpha_hat - delta))
+    second_deriv = (chi2_plus - 2.0 * chi2_min + chi2_minus) / (delta**2)
+    sigma_alpha = float(np.sqrt(2.0 / second_deriv)) if second_deriv > 0 else float(delta)
+
+    n_params = 1 + len(nuisance_terms)
+    dof = max(len(s_fit) - n_params, 1)
+
+    meta = {
+        "n_bins": len(s_fit),
+        "dof": dof,
+        "nuisance_terms": nuisance_terms,
+        "nuisance_coeffs": coeffs[1:].tolist(),
+        "bias_coeff": float(coeffs[0]),
+        "optimizer": optimizer,
+    }
+    return FitResult(alpha=alpha_hat, sigma_alpha=sigma_alpha, chi2=chi2_min, meta=meta)
