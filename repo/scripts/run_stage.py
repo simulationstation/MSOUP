@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from bao_overlap.blinding import BlindState
-from bao_overlap.correlation import compute_pair_counts, landy_szalay
+from bao_overlap.correlation import compute_pair_counts, landy_szalay, parse_wedge_bounds, wedge_xi
 from bao_overlap.density_field import build_density_field, gaussian_smooth
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.io import load_run_config, load_catalog
@@ -30,7 +30,7 @@ def main() -> None:
     output_dir = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    seed = prereg["analysis"]["random_seed"]
+    seed = prereg["random_seed"]
     dry_run_fraction = cfg["runtime"].get("dry_run_fraction") if args.dry_run else None
 
     data_cat, rand_cat = load_catalog(
@@ -40,7 +40,7 @@ def main() -> None:
         seed=seed,
     )
 
-    cosmo_cfg = prereg["analysis"]["fiducial_cosmology"]
+    cosmo_cfg = prereg["fiducial_cosmology"]
     data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **cosmo_cfg)
     rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **cosmo_cfg)
 
@@ -50,7 +50,8 @@ def main() -> None:
 
     if args.stage == "overlap_metric":
         density = build_density_field(data_xyz, rand_xyz, rand_cat.w, grid_size=64, cell_size=5.0)
-        smooth = gaussian_smooth(density, radius=prereg["analysis"]["overlap_metric"]["smoothing_radii"][0])
+        env_primary = prereg["environment_metric"]["primary"]
+        smooth = gaussian_smooth(density, radius=env_primary["parameters"]["smoothing_radius"])
         rng = np.random.default_rng(seed)
         pair_indices = rng.choice(len(data_xyz), size=min(200, len(data_xyz)), replace=False)
         pairs = np.stack([data_xyz[pair_indices], data_xyz[pair_indices[::-1]]], axis=1)
@@ -58,31 +59,34 @@ def main() -> None:
             field=smooth,
             galaxy_xyz=data_xyz,
             pair_xyz=pairs,
-            step=prereg["analysis"]["overlap_metric"]["line_integral_step"],
+            step=env_primary["parameters"]["line_integral_step"],
             rng=rng,
-            subsample=prereg["analysis"]["overlap_metric"]["pair_subsample"],
-            delta_threshold=1.0,
+            subsample=env_primary["parameters"]["pair_subsample_fraction"],
+            delta_threshold=prereg["environment_metric"]["secondary"]["parameters"]["delta_threshold"],
             min_volume=10,
-            normalize_output=prereg["analysis"]["overlap_metric"]["normalize"],
-            primary=prereg["analysis"]["overlap_metric"]["primary"],
+            normalize_output=True,
+            normalization_method=env_primary["normalization"]["method"],
+            primary=env_primary["name"],
         )
         np.savez(output_dir / "environment.npz", per_galaxy=env.per_galaxy, per_pair=env.per_pair)
         return
 
     if args.stage == "correlation":
+        corr_cfg = prereg["correlation"]["binning"]
         s_edges = np.arange(
-            prereg["analysis"]["correlation"]["s_min"],
-            prereg["analysis"]["correlation"]["s_max"] + prereg["analysis"]["correlation"]["s_bin"],
-            prereg["analysis"]["correlation"]["s_bin"],
+            corr_cfg["s_min"],
+            corr_cfg["s_max"] + corr_cfg["s_bin"],
+            corr_cfg["s_bin"],
         )
         mu_edges = np.arange(
-            prereg["analysis"]["correlation"]["mu_min"],
-            prereg["analysis"]["correlation"]["mu_max"] + prereg["analysis"]["correlation"]["mu_bin"],
-            prereg["analysis"]["correlation"]["mu_bin"],
+            corr_cfg["mu_min"],
+            corr_cfg["mu_max"] + corr_cfg["mu_bin"],
+            corr_cfg["mu_bin"],
         )
         counts = compute_pair_counts(data_xyz, rand_xyz, s_edges=s_edges, mu_edges=mu_edges)
         xi = landy_szalay(counts)
-        np.savez(output_dir / "correlation.npz", xi=xi)
+        tangential = wedge_xi(xi, mu_edges, parse_wedge_bounds(prereg["correlation"]["wedges"]["tangential"]))
+        np.savez(output_dir / "correlation.npz", xi=xi, tangential=tangential)
         return
 
     if args.stage == "reporting":

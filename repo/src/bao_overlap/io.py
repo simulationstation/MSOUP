@@ -29,7 +29,9 @@ def load_yaml(path: str | Path) -> Dict[str, Any]:
 
 def load_run_config(path: str | Path) -> Dict[str, Any]:
     cfg = load_yaml(path)
-    prereg = load_yaml(cfg["preregistration"])
+    from .prereg import load_prereg
+
+    prereg = load_prereg(cfg["preregistration"])
     datasets = load_yaml(cfg["datasets"])
     cfg["_preregistration"] = prereg
     cfg["_datasets"] = datasets

@@ -13,7 +13,13 @@ def test_fit_wedge_smoke():
         covariance=cov,
         fit_range=(60.0, 160.0),
         nuisance_terms=["a0", "a1/s"],
-        template_scale=100.0,
-        template_damping=200.0,
+        template_params={
+            "r_d": 147.0,
+            "sigma_nl": 10.0,
+            "omega_m": 0.31,
+            "omega_b": 0.049,
+            "h": 0.676,
+            "n_s": 0.97,
+        },
     )
     assert 0.8 <= result.alpha <= 1.2

@@ -67,7 +67,12 @@ def compute_e2(field: DensityField, pairs: np.ndarray, delta_threshold: float, m
     return e_values
 
 
-def normalize(values: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
+def normalize(values: np.ndarray, method: str = "mean_std") -> Tuple[np.ndarray, Dict[str, float]]:
+    if method == "median_mad":
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median))) if np.any(values) else 1.0
+        mad = mad if mad > 0 else 1.0
+        return (values - median) / mad, {"median": median, "mad": mad}
     mean = float(np.mean(values))
     std = float(np.std(values)) if np.std(values) > 0 else 1.0
     return (values - mean) / std, {"mean": mean, "std": std}
@@ -83,6 +88,7 @@ def compute_environment(
     delta_threshold: float,
     min_volume: int,
     normalize_output: bool,
+    normalization_method: str,
     primary: str,
 ) -> EnvironmentResult:
     per_galaxy = trilinear_sample(field, galaxy_xyz)
@@ -96,7 +102,10 @@ def compute_environment(
 
     meta = {"primary": primary}
     if normalize_output:
-        primary_values, stats = normalize(primary_values)
-        meta.update({f"{primary}_mean": stats["mean"], f"{primary}_std": stats["std"]})
+        primary_values, stats = normalize(primary_values, method=normalization_method)
+        if "mean" in stats:
+            meta.update({f"{primary}_mean": stats["mean"], f"{primary}_std": stats["std"]})
+        else:
+            meta.update({f"{primary}_median": stats["median"], f"{primary}_mad": stats["mad"]})
 
     return EnvironmentResult(per_galaxy=per_galaxy, per_pair=primary_values, meta=meta)

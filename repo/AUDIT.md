@@ -18,6 +18,47 @@
 
 ---
 
+## Update After Remediation Pass (Current Audit Status)
+
+### Current failures (post-fix)
+1. **Pipeline outputs are still missing in this environment.** `today_results/` and `paper_package/` are not present here, so the audit cannot verify the *execution* or output artifacts.
+2. **Mock-driven covariance not demonstrated.** Code now supports mocks and jackknife, but no mock outputs are present to prove the primary-method covariance path.
+3. **Environment assignment remains simplified.** The code still uses sampled overdensity at galaxy positions rather than pair-averaged E1 per galaxy, which is a preregistration mismatch requiring further work before unblinding.
+4. **Alpha-per-environment fitting is simplified.** The pipeline fits a single tangential wedge and reuses it across environment bins, which is not yet the preregistered per-bin BAO fitting.
+
+### What changed in this remediation
+- **Preregistration schema fixed:** Implemented `src/bao_overlap/prereg.py` and removed `prereg["analysis"]` usage. All pipeline lookups now use top-level prereg keys.
+- **Blinding enforced:** Blinded runs now call `initialize_blinding()`/`blind_results()` and write **only** `blinded_results.json`. `write_results()` rejects forbidden keys in blinded mode.
+- **Weighted Landy–Szalay normalization fixed:** Normalization now uses weighted pair counts.
+- **Wedge bounds fixed:** Wedge bounds now use numeric `(mu_min, mu_max)` via `parse_wedge_bounds`.
+- **NGC/SGC loop added:** Pipeline now loops over preregistered regions and combines pair counts.
+- **Covariance placeholder removed:** Jackknife covariance is computed and saved to disk; mock-based covariance can be used if provided.
+- **BAO template upgraded:** Placeholder sinusoid replaced with a standard Eisenstein–Hu-inspired template with damping; nuisance terms tied to preregistration.
+- **Self-audit + tests added:** `scripts/self_audit.py` and new tests ensure schema, blinding, and wedge integrity.
+
+### What remains to do before unblinding
+1. **Run the pipeline to produce auditable outputs**, including `paper_package/` with figures, covariance, and blinded results.
+2. **Implement preregistered per-environment BAO fitting** (alpha per E bin) and use those for hierarchical inference.
+3. **Align environment assignment with preregistration** (per-galaxy mean of pair E1 values, median/MAD normalization).
+4. **Demonstrate mock-based covariance** per the primary preregistration method, or document a justified fallback.
+5. **Verify robustness variants + decision criteria** as specified in the preregistration.
+
+### Post-fix compliance matrix (PASS/FAIL)
+| Requirement | Status | Evidence |
+|---|---|---|
+| Prereg schema uses top-level keys | **PASS** | `src/bao_overlap/prereg.py`, updated pipeline access |
+| Blinding enforced (no β/σβ leaks) | **PASS (code)** | `blind_results()` used; `write_results()` rejects forbidden keys |
+| Wedge bounds numeric and applied | **PASS** | `parse_wedge_bounds()` + updated pipeline |
+| Weighted Landy–Szalay normalization | **PASS** | updated `landy_szalay()` |
+| Regions NGC/SGC combined per prereg | **PASS** | loop in `scripts/run_pipeline.py` |
+| Covariance not placeholder | **PASS (code)** | jackknife covariance saved |
+| BAO template is standard & prereg-linked | **PASS (code)** | EH98-inspired template + prereg nuisance terms |
+| Per-environment BAO fitting | **FAIL** | still simplified |
+| Environment assignment per prereg | **FAIL** | still not pair-averaged per galaxy |
+| Paper package output present | **FAIL (environment)** | `paper_package/` not present here |
+
+---
+
 ## A) Repo and Environment Inventory
 
 ### A1. Repository tree (important files only)

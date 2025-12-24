@@ -38,8 +38,7 @@ def fit_wedge(
     covariance: np.ndarray,
     fit_range: Tuple[float, float],
     nuisance_terms: List[str],
-    template_scale: float,
-    template_damping: float,
+    template_params: Dict[str, float],
     alpha_grid: np.ndarray | None = None,
 ) -> FitResult:
     mask = (s >= fit_range[0]) & (s <= fit_range[1])
@@ -53,7 +52,15 @@ def fit_wedge(
 
     best = {"chi2": np.inf}
     for alpha in alpha_grid:
-        template = bao_template(alpha * s_fit, template_scale, template_damping)
+        template = bao_template(
+            alpha * s_fit,
+            r_d=template_params["r_d"],
+            sigma_nl=template_params["sigma_nl"],
+            omega_m=template_params["omega_m"],
+            omega_b=template_params["omega_b"],
+            h=template_params["h"],
+            n_s=template_params["n_s"],
+        )
         nuisance = _nuisance_design(s_fit, nuisance_terms)
         design = np.column_stack([template, nuisance])
         lhs = design.T @ inv_cov @ design
