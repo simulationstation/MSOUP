@@ -174,3 +174,36 @@ Batch:  cov = (n-1)/n * Σ(xi - mean)(xi - mean)^T
 
 ### Validation
 (To be filled after test run - see jk_memory_debug.log for first 10-15 iterations)
+
+## Alpha Bounds Widening (2025-12-23)
+
+### Problem
+In the 1% validation run (`run_20251223_205243`), BAO fitting for bin 1 hit the upper optimizer bound:
+- Bin 1: α = 1.200 (exactly at upper bound of default [0.8, 1.2])
+
+This is a **numerical safety issue**, not a result-driven change. When the optimizer hits bounds:
+1. The reported α is artificially truncated
+2. The σ_α estimate becomes unreliable (curvature cannot be measured)
+3. Downstream β inference may be biased
+
+### Decision Rationale
+This change is made **before inspecting any blinded results** from the full production run:
+- 1% sample has extreme sample variance (3,687 galaxies vs ~369,000 at 100%)
+- Boundary hits in validation run indicate bounds are too narrow for robustness
+- Standard practice is to set optimizer bounds wide enough to never constrain physical fits
+- The expected α ≈ 1.0 for fiducial cosmology; [0.6, 1.4] provides ±40% margin
+
+### Change Applied
+**Files modified:**
+- `repo/src/bao_overlap/fitting.py`: Default `alpha_bounds` changed from `(0.8, 1.2)` to `(0.6, 1.4)`
+- `repo/scripts/run_pipeline.py`: Explicit `alpha_bounds` parameter added to `fit_wedge()` call
+
+**Audit trail:**
+- Change committed before 100% production run starts
+- `alpha_bounds` now recorded in `alpha_by_Ebin.json` output for each fit
+- This section documents the change explicitly
+
+### Blinding Status
+- **NOT result-driven**: Change made based on optimizer behavior, not α values
+- **No unblinding occurred**: Blinded results remain encrypted
+- **Preregistration compatible**: Optimizer bounds are a numerical detail, not a hypothesis parameter

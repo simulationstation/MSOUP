@@ -539,6 +539,9 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         idx_start = b * len(s_centers)
         idx_end = (b + 1) * len(s_centers)
         cov_block = cov_result.covariance[idx_start:idx_end, idx_start:idx_end]
+        # Alpha bounds widened from (0.8, 1.2) to (0.6, 1.4) as numerical safety fix
+        # See AUDIT.md section "Alpha Bounds Widening" for justification
+        alpha_bounds = fit_cfg.get("alpha_bounds", (0.6, 1.4))
         fit_result = fit_wedge(
             s=s_centers,
             xi=xi_tangential[b],
@@ -547,6 +550,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             nuisance_terms=nuisance_terms,
             template_params=template_params,
             optimizer=fit_cfg["optimizer"],
+            alpha_bounds=alpha_bounds,
         )
         alpha_values.append(fit_result.alpha)
         alpha_sigmas.append(fit_result.sigma_alpha)
@@ -562,6 +566,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                     "coeffs": fit_result.meta.get("nuisance_coeffs"),
                 },
                 "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                "alpha_bounds": list(alpha_bounds),
                 "template_params": template_params,
                 "nuisance_terms": nuisance_terms,
                 "optimizer": fit_cfg["optimizer"],

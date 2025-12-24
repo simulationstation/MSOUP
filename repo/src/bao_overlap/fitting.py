@@ -40,7 +40,7 @@ def fit_wedge(
     fit_range: Tuple[float, float],
     nuisance_terms: List[str],
     template_params: Dict[str, float],
-    alpha_bounds: Tuple[float, float] = (0.8, 1.2),
+    alpha_bounds: Tuple[float, float] = (0.6, 1.4),  # Widened from (0.8, 1.2) - numerical safety fix
     optimizer: str = "L-BFGS-B",
 ) -> FitResult:
     mask = (s >= fit_range[0]) & (s <= fit_range[1])

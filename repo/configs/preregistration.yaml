@@ -167,6 +167,9 @@ bao_fitting:
 
   method: "chi2_minimization"
   optimizer: "L-BFGS-B"
+  # Alpha bounds widened from [0.8, 1.2] to [0.6, 1.4] as numerical safety fix
+  # See AUDIT.md "Alpha Bounds Widening" section for justification
+  alpha_bounds: [0.6, 1.4]
 
 # ------------------------------------------------------------------------------
 # Reconstruction
