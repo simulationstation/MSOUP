@@ -82,3 +82,34 @@ Grid params: target_cell_size=10.0, padding=50.0, max_n_per_axis=512
 
 Grid diagnostic failed with exception:
 FileNotFoundError: [Errno 2] No such file or directory: '../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits'
+
+## Grid Diagnostic
+Timestamp: 2025-12-24T02:13:03.849699Z
+Config: configs/runs/eboss_lrgpcmass_default.yaml
+Grid params: target_cell_size=10.0, padding=50.0, max_n_per_axis=512
+
+Grid diagnostic failed with exception:
+TypeError: radec_to_cartesian() got an unexpected keyword argument 'omega_b'
+
+## Grid Diagnostic
+Timestamp: 2025-12-24T02:13:49.184040Z
+Config: configs/runs/eboss_lrgpcmass_default.yaml
+Grid params: target_cell_size=10.0, padding=50.0, max_n_per_axis=512
+
+Region: NGC
+Span (h^-1 Mpc): [2086.041278121041, 3995.094296663516, 2244.6043940772925]
+Grid shape: (219, 410, 235)
+Cell sizes (h^-1 Mpc): [9.98192364438819, 9.98803486991119, 9.97703997479698]
+Coverage (h^-1 Mpc): [2186.0412781210134, 4095.0942966635876, 2344.6043940772906]
+Estimated grid memory (GB): 0.079
+Random sample invalid fraction: 0.000
+E1 diagnostic: mean attempted pairs per galaxy=0.52, mean valid pairs=0.52, invalid fraction=0.000, finite fraction=0.390
+
+Region: SGC
+Span (h^-1 Mpc): [1209.8933674539048, 3086.8095891189932, 1700.5550095038734]
+Grid shape: (131, 319, 181)
+Cell sizes (h^-1 Mpc): [9.999186011098573, 9.989998711971793, 9.947817732065573]
+Coverage (h^-1 Mpc): [1309.893367453913, 3186.8095891190023, 1800.5550095038689]
+Estimated grid memory (GB): 0.028
+Random sample invalid fraction: 0.000
+E1 diagnostic: mean attempted pairs per galaxy=0.98, mean valid pairs=0.98, invalid fraction=0.000, finite fraction=0.610

@@ -291,23 +291,83 @@ def compute_pair_counts_by_environment(
     rand_weights: Optional[np.ndarray] = None,
     verbose: bool = True,
     pair_counter: Callable[..., PairCounts] = compute_pair_counts,
+    precomputed_rr: Optional[np.ndarray] = None,
 ) -> Dict[int, PairCounts]:
-    """Compute pair counts per environment bin."""
+    """Compute pair counts per environment bin.
+
+    For environment-binned correlation functions:
+    - DD: only data pairs where BOTH galaxies are in bin b
+    - DR: data in bin b paired with ALL randoms (not E-binned)
+    - RR: ALL random pairs (same for all bins, properly normalized)
+
+    This is the standard approach because randoms trace survey geometry,
+    not clustering environment. The E-bin assignment for randoms (rand_bins)
+    is ignored for DR and RR computation.
+
+    Parameters
+    ----------
+    precomputed_rr : np.ndarray, optional
+        Pre-computed RR pair counts to reuse (for jackknife efficiency).
+        If None, RR is computed from rand_xyz.
+    """
     counts_by_bin: Dict[int, PairCounts] = {}
+
+    # Compute RR once using ALL randoms (same for all E-bins)
+    if precomputed_rr is not None:
+        rr_array = precomputed_rr
+        if verbose:
+            print(f"Using precomputed RR (shape {rr_array.shape})")
+    else:
+        if verbose:
+            print(f"Computing RR with all {len(rand_xyz)} randoms (shared across E-bins)")
+        rr_all = pair_counter(
+            rand_xyz,  # dummy for DD slot, will extract only RR
+            rand_xyz,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=rand_weights,
+            rand_weights=rand_weights,
+            verbose=False,
+        )
+        rr_array = rr_all.rr
+
     for b in range(n_bins):
         data_mask = data_bins == b
-        rand_mask = rand_bins == b
-        if not np.any(data_mask) or not np.any(rand_mask):
+        if not np.any(data_mask):
             counts_by_bin[b] = _empty_pair_counts(s_edges, mu_edges)
             continue
-        counts_by_bin[b] = pair_counter(
+
+        # DD: data in bin b only
+        # DR: data in bin b × ALL randoms
+        # RR: ALL randoms (computed once above or precomputed)
+        if verbose:
+            print(f"E-bin {b}: {np.sum(data_mask)} data galaxies")
+
+        counts = pair_counter(
             data_xyz[data_mask],
-            rand_xyz[rand_mask],
+            rand_xyz,  # ALL randoms, not masked
             s_edges=s_edges,
             mu_edges=mu_edges,
             data_weights=None if data_weights is None else data_weights[data_mask],
-            rand_weights=None if rand_weights is None else rand_weights[rand_mask],
+            rand_weights=rand_weights,  # ALL random weights
             verbose=verbose,
+        )
+
+        # Replace RR with the shared RR from all randoms
+        # Update metadata to reflect that RR uses all randoms
+        updated_meta = dict(counts.meta)
+        # For proper Landy-Szalay normalization with shared RR:
+        # - DD normalization uses sum_w_data (data in this bin)
+        # - DR normalization uses sum_w_data * sum_w_rand (data in bin × all randoms)
+        # - RR normalization uses sum_w_rand (all randoms) - already correct
+        # The metadata from counts already has correct sum_w_rand (all randoms passed)
+        counts_by_bin[b] = PairCounts(
+            s_edges=counts.s_edges,
+            mu_edges=counts.mu_edges,
+            dd=counts.dd,
+            dr=counts.dr,
+            rr=rr_array,  # Use shared RR
+            meta=updated_meta,
         )
     return counts_by_bin
 

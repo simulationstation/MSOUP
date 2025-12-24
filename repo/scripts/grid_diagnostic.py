@@ -93,8 +93,9 @@ def main() -> None:
                 dry_run_fraction=dry_run_fraction,
                 seed=prereg["random_seed"],
             )
-            data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **cosmo_cfg)
-            rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **cosmo_cfg)
+            geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
+            data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
+            rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
 
             span = np.max(np.vstack([data_xyz, rand_xyz]), axis=0) - np.min(
                 np.vstack([data_xyz, rand_xyz]), axis=0

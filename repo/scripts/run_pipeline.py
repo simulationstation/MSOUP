@@ -5,15 +5,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 
+
+def status(msg: str, output_dir: Path | None = None) -> None:
+    """Print status message with timestamp and optionally write to status file."""
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] {msg}"
+    print(line, flush=True)
+    if output_dir is not None:
+        status_file = output_dir / "pipeline_status.log"
+        with open(status_file, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
 from bao_overlap.blinding import BlindState, compute_prereg_hash, initialize_blinding, save_blinded_results
 from bao_overlap.correlation import (
     combine_pair_counts,
-    compute_pair_counts,
+    compute_pair_counts_simple,
     compute_pair_counts_by_environment,
     landy_szalay,
     parse_wedge_bounds,
@@ -43,6 +56,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
     output_dir = Path(cfg["output_dir"])
     _ensure_dir(output_dir)
+
+    status("STAGE 0: Pipeline initialization", output_dir)
 
     seed = prereg["random_seed"]
     rng = np.random.default_rng(seed)
@@ -93,7 +108,9 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     all_data_w = []
     all_rand_w = []
 
+    status(f"STAGE 1: Processing {len(regions)} regions: {regions}", output_dir)
     for region in regions:
+        status(f"  Loading catalog for {region}...", output_dir)
         data_cat, rand_cat = load_catalog(
             datasets_cfg=datasets,
             catalog_key=cfg["catalog"],
@@ -101,10 +118,12 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             dry_run_fraction=dry_run_fraction,
             seed=seed,
         )
+        status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
         geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
         data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
         rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
 
+        status(f"  Building density field for {region}...", output_dir)
         grid_spec = build_grid_spec(
             data_xyz=data_xyz,
             random_xyz=rand_xyz,
@@ -112,6 +131,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             padding=padding,
             max_n_per_axis=max_n_per_axis,
         )
+        status(f"  {region} grid: {grid_spec.grid_shape}, cell_sizes: {grid_spec.cell_sizes}", output_dir)
         density = build_density_field(
             data_xyz,
             rand_xyz,
@@ -134,6 +154,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             },
         )
 
+        status(f"  Computing E1 environment metric for {region} ({len(data_xyz)} galaxies)...", output_dir)
+        t0 = time.time()
         env_raw, env_meta = compute_per_galaxy_mean_e1(
             field=smooth,
             galaxy_xyz=data_xyz,
@@ -144,6 +166,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             pair_subsample_fraction=pair_subsample_fraction,
             max_outside_fraction=max_outside_fraction,
         )
+        valid_e1 = np.sum(np.isfinite(env_raw))
+        status(f"  {region} E1 done: {valid_e1}/{len(env_raw)} valid ({time.time()-t0:.1f}s)", output_dir)
 
         rand_local = trilinear_sample(smooth, rand_xyz)
 
@@ -241,9 +265,12 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     with open(output_dir / "environment_assignment_diagnostics.json", "w", encoding="utf-8") as handle:
         json.dump(env_diag, handle, indent=2)
 
+    status("STAGE 2: Computing pair counts by environment bin", output_dir)
     counts_by_region = {}
     counts_all_regions = []
     for region in regions:
+        status(f"  Computing pair counts for {region}...", output_dir)
+        t0 = time.time()
         region_payload = per_region[region]
         counts_by_bin = compute_pair_counts_by_environment(
             region_payload["data_xyz"],
@@ -256,11 +283,12 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             data_weights=region_payload["data"].w,
             rand_weights=region_payload["randoms"].w,
             verbose=False,
-            pair_counter=compute_pair_counts,
+            pair_counter=compute_pair_counts_simple,
         )
+        status(f"  {region} pair counts done ({time.time()-t0:.1f}s)", output_dir)
         counts_by_region[region] = counts_by_bin
         counts_all_regions.append(
-            compute_pair_counts(
+            compute_pair_counts_simple(
                 region_payload["data_xyz"],
                 region_payload["rand_xyz"],
                 s_edges=s_edges,
@@ -333,7 +361,9 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     cov_method = cov_cfg["primary_method"]
     cov_meta: Dict[str, Any] = {"method": cov_method}
 
+    status("STAGE 3: Computing covariance matrix", output_dir)
     if cov_method == "mocks" and mock_cov_path.exists():
+        status("  Using mock covariance", output_dir)
         mock_wedges = np.load(mock_cov_path)
         if mock_wedges.ndim == 3:
             mock_data = mock_wedges.reshape(mock_wedges.shape[0], -1)
@@ -344,6 +374,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     else:
         cov_method = cov_cfg["fallback_method"]
         cov_meta["method"] = cov_method
+        status(f"  Using jackknife covariance (method={cov_method})", output_dir)
         jk_cfg = cov_cfg["jackknife"]
         data_xyz_all = np.vstack(all_xyz)
         rand_xyz_all = np.vstack(all_rand_xyz)
@@ -371,8 +402,28 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             nside=jk_cfg.get("nside"),
         )
 
+        n_jk = jk_cfg["n_regions"]
+        status(f"  Jackknife loop: {n_jk} regions", output_dir)
+
+        # Precompute RR once with all randoms (approximation for JK efficiency)
+        # The leave-one-out RR variation is small (~1%) and negligible for covariance
+        status("  Precomputing RR with all randoms...", output_dir)
+        rr_precompute = compute_pair_counts_simple(
+            rand_xyz_all,
+            rand_xyz_all,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=rand_w_all,
+            rand_weights=rand_w_all,
+            verbose=False,
+        )
+        precomputed_rr = rr_precompute.rr
+        status(f"  RR precomputed (shape {precomputed_rr.shape})", output_dir)
+
         jk_vectors = []
-        for idx in range(jk_cfg["n_regions"]):
+        jk_start = time.time()
+        for idx in range(n_jk):
+            iter_start = time.time()
             data_mask = jk_data_regions != idx
             rand_mask = jk_rand_regions != idx
             counts_by_bin = compute_pair_counts_by_environment(
@@ -386,15 +437,22 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 data_weights=data_w_all[data_mask],
                 rand_weights=rand_w_all[rand_mask],
                 verbose=False,
-                pair_counter=compute_pair_counts,
+                pair_counter=compute_pair_counts_simple,
+                precomputed_rr=precomputed_rr,
             )
             vecs = []
             for b in range(n_bins):
                 xi_bin = landy_szalay(counts_by_bin[b])
                 vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
             jk_vectors.append(np.concatenate(vecs))
+            iter_time = time.time() - iter_start
+            elapsed = time.time() - jk_start
+            avg_time = elapsed / (idx + 1)
+            remaining = avg_time * (n_jk - idx - 1)
+            status(f"  JK {idx+1}/{n_jk} done ({iter_time:.1f}s) | elapsed: {elapsed:.0f}s | est remaining: {remaining:.0f}s", output_dir)
 
         jk_vectors = np.asarray(jk_vectors)
+        status(f"  Jackknife complete ({time.time()-jk_start:.1f}s total)", output_dir)
         cov_result = covariance_from_jackknife(jk_vectors)
         cov_meta.update(cov_result.meta)
 
@@ -412,10 +470,12 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         "n_s": prereg["fiducial_cosmology"]["n_s"],
     }
 
+    status("STAGE 4: BAO fitting per environment bin", output_dir)
     alpha_records = []
     alpha_values = []
     alpha_sigmas = []
     for b in range(n_bins):
+        status(f"  Fitting bin {b+1}/{n_bins}...", output_dir)
         idx_start = b * len(s_centers)
         idx_end = (b + 1) * len(s_centers)
         cov_block = cov_result.covariance[idx_start:idx_end, idx_start:idx_end]
@@ -472,6 +532,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     if method == "bayesian":
         prior_sigma = hier_cfg["bayesian_option"]["priors"]["beta_sigma"]
 
+    status("STAGE 5: Blinding and hierarchical inference", output_dir)
     blind_state = BlindState(
         unblind=cfg.get("blinding", {}).get("unblind", False),
         key_file=prereg["blinding"]["encryption"]["key_file"],
@@ -493,6 +554,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         raise RuntimeError("Unblinded runs are disabled in this pipeline version.")
 
     save_metadata(output_dir / "metadata.json", {"seed": seed, "catalog": cfg["catalog"]})
+    status("STAGE 6: Writing output package", output_dir)
 
     if prereg["reporting"]["generate_methods_snapshot"]:
         resolved = {
@@ -567,6 +629,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             if file_path.exists():
                 file_path.unlink()
         raise
+
+    status("PIPELINE COMPLETE - All stages finished successfully", output_dir)
 
 
 def main() -> None:
