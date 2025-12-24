@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Number of parallel workers
-N_JOBS = min(10, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
+N_JOBS = min(20, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:
@@ -161,160 +161,259 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     all_data_w = []
     all_rand_w = []
 
-    status(f"STAGE 1: Processing {len(regions)} regions: {regions}", output_dir)
-    for region in regions:
-        status(f"  Loading catalog for {region}...", output_dir)
-        data_cat, rand_cat = load_catalog(
-            datasets_cfg=datasets,
-            catalog_key=cfg["catalog"],
-            region=region,
-            dry_run_fraction=dry_run_fraction,
-            seed=seed,
-        )
-        status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
-        geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
-        data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
-        rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
-
-        status(f"  Building density field for {region}...", output_dir)
-        grid_spec = build_grid_spec(
-            data_xyz=data_xyz,
-            random_xyz=rand_xyz,
-            target_cell_size=target_cell_size,
-            padding=padding,
-            max_n_per_axis=max_n_per_axis,
-        )
-        status(f"  {region} grid: {grid_spec.grid_shape}, cell_sizes: {grid_spec.cell_sizes}", output_dir)
-        density = build_density_field(
-            data_xyz,
-            rand_xyz,
-            data_cat.w,
-            rand_cat.w,
-            grid_spec=grid_spec,
-        )
-        smooth = gaussian_smooth(density, radius=smoothing_radius)
-        save_density_field(
-            output_dir / f"density_field_{region}.npz",
-            smooth,
-            meta={
-                "region": region,
-                "grid_shape": grid_spec.grid_shape,
-                "cell_sizes": grid_spec.cell_sizes.tolist(),
-                "padding": padding,
-                "target_cell_size": target_cell_size,
-                "smoothing_radius": smoothing_radius,
-                "line_integral_step": line_step,
-            },
-        )
-
-        status(f"  Computing E1 environment metric for {region} ({len(data_xyz)} galaxies)...", output_dir)
-        t0 = time.time()
-        env_raw, env_meta = compute_per_galaxy_mean_e1(
-            field=smooth,
-            galaxy_xyz=data_xyz,
-            s_min=fit_range[0],
-            s_max=fit_range[1],
-            step=line_step,
-            rng=rng,
-            pair_subsample_fraction=pair_subsample_fraction,
-            max_outside_fraction=max_outside_fraction,
-        )
-        valid_e1 = np.sum(np.isfinite(env_raw))
-        status(f"  {region} E1 done: {valid_e1}/{len(env_raw)} valid ({time.time()-t0:.1f}s)", output_dir)
-
-        rand_local = trilinear_sample(smooth, rand_xyz)
-
-        per_region[region] = {
-            "data": data_cat,
-            "randoms": rand_cat,
-            "data_xyz": data_xyz,
-            "rand_xyz": rand_xyz,
-            "env_raw": env_raw,
-            "env_meta": env_meta,
-            "rand_local": rand_local,
-        }
-        all_env_raw.append(env_raw)
-        all_ra.append(data_cat.ra)
-        all_dec.append(data_cat.dec)
-        all_z.append(data_cat.z)
-        all_region.append(np.full(len(data_cat.ra), region))
-        all_xyz.append(data_xyz)
-        all_rand_xyz.append(rand_xyz)
-        all_data_w.append(data_cat.w)
-        all_rand_w.append(rand_cat.w)
-
-    env_raw_all = np.concatenate(all_env_raw)
-    valid_mask = np.isfinite(env_raw_all)
-    env_norm_all = np.full_like(env_raw_all, np.nan, dtype="f8")
-    norm_stats: Dict[str, float] = {}
-    if np.any(valid_mask):
-        env_norm_all[valid_mask], norm_stats = normalize(env_raw_all[valid_mask], method=normalization_method)
-
-    env_bin_edges = np.quantile(env_norm_all[valid_mask], quantile_edges)
-    env_bin_centers = 0.5 * (env_bin_edges[:-1] + env_bin_edges[1:])
-
-    def _assign_bins(values: np.ndarray) -> np.ndarray:
-        bins = np.full_like(values, -1, dtype=int)
-        valid = np.isfinite(values)
-        if np.any(valid):
-            bins[valid] = np.clip(
-                np.digitize(values[valid], env_bin_edges[1:-1], right=False),
-                0,
-                n_bins - 1,
-            )
-        return bins
-
-    env_bins_all = _assign_bins(env_norm_all)
-
-    offset = 0
-    for region in regions:
-        n_reg = len(per_region[region]["env_raw"])
-        reg_slice = slice(offset, offset + n_reg)
-        per_region[region]["env_norm"] = env_norm_all[reg_slice]
-        per_region[region]["env_bin"] = env_bins_all[reg_slice]
-        rand_norm = np.full_like(per_region[region]["rand_local"], np.nan, dtype="f8")
-        if np.any(valid_mask):
-            scale = norm_stats.get("scale") or norm_stats.get("std") or 1.0
-            center = norm_stats.get("median", norm_stats.get("mean", 0.0))
-            rand_norm = (per_region[region]["rand_local"] - center) / scale
-        per_region[region]["rand_bin"] = _assign_bins(rand_norm)
-        offset += n_reg
-
-    galaxy_id = np.arange(len(env_raw_all))
+    # Check for existing E1 results (resume capability)
     e_by_galaxy_path = output_dir / "E_by_galaxy.npz"
-    np.savez(
-        e_by_galaxy_path,
-        galaxy_id=galaxy_id,
-        region=np.concatenate(all_region),
-        z=np.concatenate(all_z),
-        ra=np.concatenate(all_ra),
-        dec=np.concatenate(all_dec),
-        E1_raw=env_raw_all,
-        E1_value=env_norm_all,
-        E_bin=env_bins_all,
-        E_bin_edges=env_bin_edges,
-        E_bin_centers=env_bin_centers,
-        normalization_method=np.array([normalization_method], dtype=object),
-        normalization_median=np.array([norm_stats.get("median", np.nan)], dtype="f8"),
-        normalization_mad=np.array([norm_stats.get("mad", np.nan)], dtype="f8"),
-        normalization_scale=np.array([norm_stats.get("scale", np.nan)], dtype="f8"),
-    )
+    resume_from_e1 = e_by_galaxy_path.exists()
 
-    env_diag: Dict[str, Any] = {}
-    for region in regions:
-        meta = per_region[region]["env_meta"]
-        attempted = meta["attempted_pairs"]
-        valid = meta["valid_pairs"]
-        invalid = meta["invalid_pairs"]
-        total_attempted = int(attempted.sum())
-        total_invalid = int(invalid.sum())
-        env_diag[region] = {
-            "mean_valid_pairs": float(np.mean(valid)) if len(valid) else 0.0,
-            "median_valid_pairs": float(np.median(valid)) if len(valid) else 0.0,
-            "min_valid_pairs": int(np.min(valid)) if len(valid) else 0,
-            "max_valid_pairs": int(np.max(valid)) if len(valid) else 0,
-            "invalid_fraction": float(total_invalid / max(total_attempted, 1)),
+    if resume_from_e1:
+        status("STAGE 1: RESUMING from existing E_by_galaxy.npz", output_dir)
+        saved_e1 = np.load(e_by_galaxy_path, allow_pickle=True)
+        saved_regions = saved_e1["region"]
+        saved_e1_raw = saved_e1["E1_raw"]
+        saved_e1_norm = saved_e1["E1_value"]
+        saved_e_bin = saved_e1["E_bin"]
+        env_bin_edges = saved_e1["E_bin_edges"]
+        env_bin_centers = saved_e1["E_bin_centers"]
+        norm_method_arr = saved_e1["normalization_method"]
+        normalization_method = str(norm_method_arr[0]) if len(norm_method_arr) else "median_mad"
+        norm_stats = {
+            "median": float(saved_e1["normalization_median"][0]),
+            "mad": float(saved_e1["normalization_mad"][0]),
+            "scale": float(saved_e1["normalization_scale"][0]),
         }
+
+        def _assign_bins(values: np.ndarray) -> np.ndarray:
+            bins = np.full_like(values, -1, dtype=int)
+            valid = np.isfinite(values)
+            if np.any(valid):
+                bins[valid] = np.clip(
+                    np.digitize(values[valid], env_bin_edges[1:-1], right=False),
+                    0,
+                    n_bins - 1,
+                )
+            return bins
+
+        # Load catalogs (quick) and reconstruct per_region
+        offset = 0
+        for region in regions:
+            status(f"  Loading catalog for {region} (resume mode)...", output_dir)
+            data_cat, rand_cat = load_catalog(
+                datasets_cfg=datasets,
+                catalog_key=cfg["catalog"],
+                region=region,
+                dry_run_fraction=dry_run_fraction,
+                seed=seed,
+            )
+            status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
+            geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
+            data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
+            rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
+
+            # Load density field for rand_local
+            density_path = output_dir / f"density_field_{region}.npz"
+            if density_path.exists():
+                from bao_overlap.density_field import load_density_field
+                smooth = load_density_field(density_path)
+                rand_local = trilinear_sample(smooth, rand_xyz)
+            else:
+                rand_local = np.zeros(len(rand_xyz))
+
+            n_reg = len(data_cat.ra)
+            reg_slice = slice(offset, offset + n_reg)
+            env_raw = saved_e1_raw[reg_slice]
+            env_norm = saved_e1_norm[reg_slice]
+            env_bin = saved_e_bin[reg_slice]
+
+            # Normalize rand_local and assign bins
+            scale = norm_stats.get("scale") or 1.0
+            center = norm_stats.get("median", 0.0)
+            rand_norm = (rand_local - center) / scale
+            rand_bin = _assign_bins(rand_norm)
+
+            per_region[region] = {
+                "data": data_cat,
+                "randoms": rand_cat,
+                "data_xyz": data_xyz,
+                "rand_xyz": rand_xyz,
+                "env_raw": env_raw,
+                "env_meta": {},  # Not needed for pair counts
+                "env_norm": env_norm,
+                "env_bin": env_bin,
+                "rand_local": rand_local,
+                "rand_bin": rand_bin,
+            }
+            all_env_raw.append(env_raw)
+            all_ra.append(data_cat.ra)
+            all_dec.append(data_cat.dec)
+            all_z.append(data_cat.z)
+            all_region.append(np.full(len(data_cat.ra), region))
+            all_xyz.append(data_xyz)
+            all_rand_xyz.append(rand_xyz)
+            all_data_w.append(data_cat.w)
+            all_rand_w.append(rand_cat.w)
+            offset += n_reg
+
+        env_raw_all = np.concatenate(all_env_raw)
+        env_norm_all = saved_e1_norm
+        env_bins_all = saved_e_bin
+        status("  Resume complete - skipping to Stage 2", output_dir)
+
+    else:
+        status(f"STAGE 1: Processing {len(regions)} regions: {regions}", output_dir)
+        for region in regions:
+            status(f"  Loading catalog for {region}...", output_dir)
+            data_cat, rand_cat = load_catalog(
+                datasets_cfg=datasets,
+                catalog_key=cfg["catalog"],
+                region=region,
+                dry_run_fraction=dry_run_fraction,
+                seed=seed,
+            )
+            status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
+            geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
+            data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
+            rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
+
+            status(f"  Building density field for {region}...", output_dir)
+            grid_spec = build_grid_spec(
+                data_xyz=data_xyz,
+                random_xyz=rand_xyz,
+                target_cell_size=target_cell_size,
+                padding=padding,
+                max_n_per_axis=max_n_per_axis,
+            )
+            status(f"  {region} grid: {grid_spec.grid_shape}, cell_sizes: {grid_spec.cell_sizes}", output_dir)
+            density = build_density_field(
+                data_xyz,
+                rand_xyz,
+                data_cat.w,
+                rand_cat.w,
+                grid_spec=grid_spec,
+            )
+            smooth = gaussian_smooth(density, radius=smoothing_radius)
+            save_density_field(
+                output_dir / f"density_field_{region}.npz",
+                smooth,
+                meta={
+                    "region": region,
+                    "grid_shape": grid_spec.grid_shape,
+                    "cell_sizes": grid_spec.cell_sizes.tolist(),
+                    "padding": padding,
+                    "target_cell_size": target_cell_size,
+                    "smoothing_radius": smoothing_radius,
+                    "line_integral_step": line_step,
+                },
+            )
+
+            status(f"  Computing E1 environment metric for {region} ({len(data_xyz)} galaxies)...", output_dir)
+            t0 = time.time()
+            env_raw, env_meta = compute_per_galaxy_mean_e1(
+                field=smooth,
+                galaxy_xyz=data_xyz,
+                s_min=fit_range[0],
+                s_max=fit_range[1],
+                step=line_step,
+                rng=rng,
+                pair_subsample_fraction=pair_subsample_fraction,
+                max_outside_fraction=max_outside_fraction,
+            )
+            valid_e1 = np.sum(np.isfinite(env_raw))
+            status(f"  {region} E1 done: {valid_e1}/{len(env_raw)} valid ({time.time()-t0:.1f}s)", output_dir)
+
+            rand_local = trilinear_sample(smooth, rand_xyz)
+
+            per_region[region] = {
+                "data": data_cat,
+                "randoms": rand_cat,
+                "data_xyz": data_xyz,
+                "rand_xyz": rand_xyz,
+                "env_raw": env_raw,
+                "env_meta": env_meta,
+                "rand_local": rand_local,
+            }
+            all_env_raw.append(env_raw)
+            all_ra.append(data_cat.ra)
+            all_dec.append(data_cat.dec)
+            all_z.append(data_cat.z)
+            all_region.append(np.full(len(data_cat.ra), region))
+            all_xyz.append(data_xyz)
+            all_rand_xyz.append(rand_xyz)
+            all_data_w.append(data_cat.w)
+            all_rand_w.append(rand_cat.w)
+
+        env_raw_all = np.concatenate(all_env_raw)
+        valid_mask = np.isfinite(env_raw_all)
+        env_norm_all = np.full_like(env_raw_all, np.nan, dtype="f8")
+        norm_stats: Dict[str, float] = {}
+        if np.any(valid_mask):
+            env_norm_all[valid_mask], norm_stats = normalize(env_raw_all[valid_mask], method=normalization_method)
+
+        env_bin_edges = np.quantile(env_norm_all[valid_mask], quantile_edges)
+        env_bin_centers = 0.5 * (env_bin_edges[:-1] + env_bin_edges[1:])
+
+        def _assign_bins(values: np.ndarray) -> np.ndarray:
+            bins = np.full_like(values, -1, dtype=int)
+            valid = np.isfinite(values)
+            if np.any(valid):
+                bins[valid] = np.clip(
+                    np.digitize(values[valid], env_bin_edges[1:-1], right=False),
+                    0,
+                    n_bins - 1,
+                )
+            return bins
+
+        env_bins_all = _assign_bins(env_norm_all)
+
+        offset = 0
+        for region in regions:
+            n_reg = len(per_region[region]["env_raw"])
+            reg_slice = slice(offset, offset + n_reg)
+            per_region[region]["env_norm"] = env_norm_all[reg_slice]
+            per_region[region]["env_bin"] = env_bins_all[reg_slice]
+            rand_norm = np.full_like(per_region[region]["rand_local"], np.nan, dtype="f8")
+            if np.any(valid_mask):
+                scale = norm_stats.get("scale") or norm_stats.get("std") or 1.0
+                center = norm_stats.get("median", norm_stats.get("mean", 0.0))
+                rand_norm = (per_region[region]["rand_local"] - center) / scale
+            per_region[region]["rand_bin"] = _assign_bins(rand_norm)
+            offset += n_reg
+
+        galaxy_id = np.arange(len(env_raw_all))
+        np.savez(
+            e_by_galaxy_path,
+            galaxy_id=galaxy_id,
+            region=np.concatenate(all_region),
+            z=np.concatenate(all_z),
+            ra=np.concatenate(all_ra),
+            dec=np.concatenate(all_dec),
+            E1_raw=env_raw_all,
+            E1_value=env_norm_all,
+            E_bin=env_bins_all,
+            E_bin_edges=env_bin_edges,
+            E_bin_centers=env_bin_centers,
+            normalization_method=np.array([normalization_method], dtype=object),
+            normalization_median=np.array([norm_stats.get("median", np.nan)], dtype="f8"),
+            normalization_mad=np.array([norm_stats.get("mad", np.nan)], dtype="f8"),
+            normalization_scale=np.array([norm_stats.get("scale", np.nan)], dtype="f8"),
+        )
+
+    # Environment diagnostics (skip detailed stats in resume mode)
+    env_diag: Dict[str, Any] = {}
+    if not resume_from_e1:
+        for region in regions:
+            meta = per_region[region]["env_meta"]
+            attempted = meta["attempted_pairs"]
+            valid = meta["valid_pairs"]
+            invalid = meta["invalid_pairs"]
+            total_attempted = int(attempted.sum())
+            total_invalid = int(invalid.sum())
+            env_diag[region] = {
+                "mean_valid_pairs": float(np.mean(valid)) if len(valid) else 0.0,
+                "median_valid_pairs": float(np.median(valid)) if len(valid) else 0.0,
+                "min_valid_pairs": int(np.min(valid)) if len(valid) else 0,
+                "max_valid_pairs": int(np.max(valid)) if len(valid) else 0,
+                "invalid_fraction": float(total_invalid / max(total_attempted, 1)),
+            }
     with open(output_dir / "environment_assignment_diagnostics.json", "w", encoding="utf-8") as handle:
         json.dump(env_diag, handle, indent=2)
 
@@ -345,27 +444,90 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         pass
 
     status("STAGE 2: Computing pair counts by environment bin", output_dir)
-    counts_by_region = {}
+
+    # Check for checkpoint file
+    pair_counts_checkpoint = output_dir / "pair_counts_checkpoint.npz"
+    counts_by_region: Dict[str, Dict[int, Any]] = {r: {} for r in regions}
     counts_all_regions = []
-    for region in regions:
-        status(f"  Computing pair counts for {region}...", output_dir)
+
+    if pair_counts_checkpoint.exists():
+        status("  Resuming from pair counts checkpoint...", output_dir)
+        ckpt = np.load(pair_counts_checkpoint, allow_pickle=True)
+        completed_bins = int(ckpt["completed_bins"])
+        status(f"  Found checkpoint with {completed_bins} bins completed", output_dir)
+        # Load completed bins
+        for region in regions:
+            for b in range(completed_bins):
+                counts_by_region[region][b] = PairCounts(
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    dd=ckpt[f"dd_{region}_{b}"],
+                    dr=ckpt[f"dr_{region}_{b}"],
+                    rr=ckpt[f"rr_{region}_{b}"],
+                    meta={"loaded_from_checkpoint": True},
+                )
+        start_bin = completed_bins
+    else:
+        start_bin = 0
+
+    # Process bins one at a time with memory cleanup
+    import gc
+    for b in range(start_bin, n_bins):
+        status(f"  Processing E-bin {b}/{n_bins-1}...", output_dir)
         t0 = time.time()
+
+        for region in regions:
+            region_payload = per_region[region]
+            data_mask = region_payload["env_bin"] == b
+
+            if not np.any(data_mask):
+                counts_by_region[region][b] = PairCounts(
+                    s_edges=s_edges, mu_edges=mu_edges,
+                    dd=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                    dr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                    rr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                    meta={"n_data": 0},
+                )
+                continue
+
+            counts = compute_pair_counts_simple(
+                region_payload["data_xyz"][data_mask],
+                region_payload["rand_xyz"],
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                data_weights=region_payload["data"].w[data_mask] if region_payload["data"].w is not None else None,
+                rand_weights=region_payload["randoms"].w,
+                verbose=False,
+            )
+            counts_by_region[region][b] = counts
+            status(f"    {region} bin {b}: {np.sum(data_mask)} galaxies ({time.time()-t0:.1f}s)", output_dir)
+
+        # Save checkpoint after each bin
+        ckpt_data = {"completed_bins": np.array([b + 1])}
+        for region in regions:
+            for bb in range(b + 1):
+                ckpt_data[f"dd_{region}_{bb}"] = counts_by_region[region][bb].dd
+                ckpt_data[f"dr_{region}_{bb}"] = counts_by_region[region][bb].dr
+                ckpt_data[f"rr_{region}_{bb}"] = counts_by_region[region][bb].rr
+        np.savez(pair_counts_checkpoint, **ckpt_data)
+        status(f"  Checkpoint saved (bin {b} done)", output_dir)
+
+        # Memory cleanup
+        gc.collect()
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemAvailable:'):
+                        avail = int(line.split()[1]) / 1e6
+                        status(f"  Memory: {avail:.1f} GB available", output_dir)
+                        break
+        except:
+            pass
+
+    # Compute combined counts for all regions
+    status("  Computing combined region counts...", output_dir)
+    for region in regions:
         region_payload = per_region[region]
-        counts_by_bin = compute_pair_counts_by_environment(
-            region_payload["data_xyz"],
-            region_payload["rand_xyz"],
-            region_payload["env_bin"],
-            region_payload["rand_bin"],
-            n_bins=n_bins,
-            s_edges=s_edges,
-            mu_edges=mu_edges,
-            data_weights=region_payload["data"].w,
-            rand_weights=region_payload["randoms"].w,
-            verbose=False,
-            pair_counter=compute_pair_counts_simple,
-        )
-        status(f"  {region} pair counts done ({time.time()-t0:.1f}s)", output_dir)
-        counts_by_region[region] = counts_by_bin
         counts_all_regions.append(
             compute_pair_counts_simple(
                 region_payload["data_xyz"],
@@ -377,6 +539,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 verbose=False,
             )
         )
+        gc.collect()
 
     counts_by_bin_combined = {}
     for b in range(n_bins):
@@ -538,32 +701,72 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         jk_start = time.time()
         rss_start = get_rss_gb()
 
-        # --- PARALLEL JK ITERATIONS ---
-        status(f"  [JK parallel] Starting {n_jk} iterations on {N_JOBS} workers...", output_dir)
+        # --- RESUMABLE JK ITERATIONS WITH CHECKPOINTING ---
+        jk_checkpoint_path = output_dir / "jk_checkpoint.npz"
+        start_idx = 0
 
-        jk_results = Parallel(n_jobs=N_JOBS, verbose=10, batch_size=1)(
-            delayed(_jk_iteration)(
-                idx=idx,
-                data_xyz_all=data_xyz_all,
-                rand_xyz_all=rand_xyz_all,
-                env_bin_all=env_bin_all,
-                rand_bin_all=rand_bin_all,
-                data_w_all=data_w_all,
-                rand_w_all=rand_w_all,
-                jk_data_regions=jk_data_regions,
-                jk_rand_regions=jk_rand_regions,
-                n_bins=n_bins,
-                s_edges=s_edges,
-                mu_edges=mu_edges,
-                tangential_bounds=tangential_bounds,
-                precomputed_rr=precomputed_rr,
+        if jk_checkpoint_path.exists():
+            status("  Resuming JK from checkpoint...", output_dir)
+            jk_ckpt = np.load(jk_checkpoint_path)
+            start_idx = int(jk_ckpt["completed_iterations"])
+            jk_accum.sum_x = jk_ckpt["sum_x"].copy()
+            jk_accum.sum_xx = jk_ckpt["sum_xx"].copy()
+            jk_accum.n = int(jk_ckpt["n"])
+            status(f"  Resumed from iteration {start_idx}/{n_jk}", output_dir)
+
+        # Process in batches for checkpointing (batch_size iterations, then save)
+        jk_batch_size = 10  # Save checkpoint every 10 iterations
+
+        for batch_start in range(start_idx, n_jk, jk_batch_size):
+            batch_end = min(batch_start + jk_batch_size, n_jk)
+            batch_indices = list(range(batch_start, batch_end))
+
+            status(f"  [JK] Processing iterations {batch_start}-{batch_end-1}/{n_jk-1}...", output_dir)
+
+            jk_results = Parallel(n_jobs=N_JOBS, verbose=0, batch_size=1)(
+                delayed(_jk_iteration)(
+                    idx=idx,
+                    data_xyz_all=data_xyz_all,
+                    rand_xyz_all=rand_xyz_all,
+                    env_bin_all=env_bin_all,
+                    rand_bin_all=rand_bin_all,
+                    data_w_all=data_w_all,
+                    rand_w_all=rand_w_all,
+                    jk_data_regions=jk_data_regions,
+                    jk_rand_regions=jk_rand_regions,
+                    n_bins=n_bins,
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    tangential_bounds=tangential_bounds,
+                    precomputed_rr=precomputed_rr,
+                )
+                for idx in batch_indices
             )
-            for idx in range(n_jk)
-        )
 
-        # Update streaming accumulator with all results
-        for idx, xi_jk in enumerate(jk_results):
-            jk_accum.update(xi_jk)
+            # Update streaming accumulator with batch results
+            for xi_jk in jk_results:
+                jk_accum.update(xi_jk)
+
+            # Save checkpoint after each batch
+            np.savez(
+                jk_checkpoint_path,
+                completed_iterations=np.array([batch_end]),
+                sum_x=jk_accum.sum_x,
+                sum_xx=jk_accum.sum_xx,
+                n=np.array([jk_accum.n]),
+            )
+
+            # Memory cleanup and status
+            gc.collect()
+            try:
+                with open('/proc/meminfo') as f:
+                    for line in f:
+                        if line.startswith('MemAvailable:'):
+                            avail = int(line.split()[1]) / 1e6
+                            status(f"  [JK] Checkpoint saved ({batch_end}/{n_jk}), Memory: {avail:.1f} GB", output_dir)
+                            break
+            except:
+                status(f"  [JK] Checkpoint saved ({batch_end}/{n_jk})", output_dir)
 
         rss_now = get_rss_gb()
         with open(mem_log_path, "a") as f:

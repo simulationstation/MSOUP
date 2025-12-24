@@ -179,3 +179,15 @@ def save_density_field(path: Path, field: DensityField, meta: Dict[str, Any]) ->
         grid_shape=np.array(field.grid_shape, dtype=int),
         meta=np.array([json.dumps(meta)], dtype=object),
     )
+
+
+def load_density_field(path: Path) -> DensityField:
+    """Load a density field from disk."""
+    data = np.load(path, allow_pickle=True)
+    grid_shape = tuple(data["grid_shape"].tolist())
+    return DensityField(
+        grid=data["grid"],
+        origin=data["origin"],
+        cell_sizes=data["cell_sizes"],
+        grid_shape=grid_shape,
+    )
