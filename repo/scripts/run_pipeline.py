@@ -32,7 +32,12 @@ from bao_overlap.correlation import (
     parse_wedge_bounds,
     wedge_xi,
 )
-from bao_overlap.covariance import assign_jackknife_regions, covariance_from_jackknife, covariance_from_mocks
+from bao_overlap.covariance import (
+    assign_jackknife_regions,
+    covariance_from_jackknife,
+    covariance_from_mocks,
+    StreamingJackknifeCovariance,
+)
 from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth, save_density_field, trilinear_sample
 from bao_overlap.fitting import fit_wedge
 from bao_overlap.geometry import radec_to_cartesian
@@ -420,12 +425,51 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         precomputed_rr = rr_precompute.rr
         status(f"  RR precomputed (shape {precomputed_rr.shape})", output_dir)
 
-        jk_vectors = []
+        # --- MEMORY FIX: Use streaming covariance instead of storing all JK vectors ---
+        # Previous code stored jk_vectors list that grew each iteration.
+        # Now we use StreamingJackknifeCovariance which maintains only sum_x and sum_xx.
+        # This is mathematically equivalent but uses O(M^2) memory instead of O(N*M).
+        import gc
+        import os
+
+        # Get memory info function
+        def get_rss_gb():
+            """Get resident set size in GB."""
+            try:
+                import psutil
+                return psutil.Process(os.getpid()).memory_info().rss / 1e9
+            except ImportError:
+                import resource
+                return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # KB to GB
+
+        # Initialize memory debug log
+        mem_log_path = output_dir / "jk_memory_debug.log"
+        with open(mem_log_path, "w") as f:
+            f.write("# JK Memory Debug Log\n")
+            f.write("# Memory fix: streaming covariance accumulator\n")
+            f.write("# Objects previously growing: jk_vectors list (100 x M floats)\n")
+            f.write("# Now using: StreamingJackknifeCovariance (sum_x: M, sum_xx: M x M)\n")
+            f.write(f"# Vector size M = n_bins * n_s = {n_bins} * {len(s_edges)-1}\n")
+            f.write("#\n")
+            f.write("# iter, RSS_GB, accum_bytes, iter_time_s\n")
+
+        # Set aggressive GC thresholds for this stage
+        gc.set_threshold(700, 10, 10)
+
+        # Determine vector size: n_bins * n_s_bins (tangential wedge only)
+        n_s = len(s_edges) - 1
+        vector_size = n_bins * n_s
+        jk_accum = StreamingJackknifeCovariance(vector_size)
+
         jk_start = time.time()
+        rss_start = get_rss_gb()
+
         for idx in range(n_jk):
             iter_start = time.time()
             data_mask = jk_data_regions != idx
             rand_mask = jk_rand_regions != idx
+
+            # Compute pair counts (these are the large temporaries)
             counts_by_bin = compute_pair_counts_by_environment(
                 data_xyz_all[data_mask],
                 rand_xyz_all[rand_mask],
@@ -440,20 +484,36 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 pair_counter=compute_pair_counts_simple,
                 precomputed_rr=precomputed_rr,
             )
+
+            # Extract xi wedge vector for this JK sample
             vecs = []
             for b in range(n_bins):
                 xi_bin = landy_szalay(counts_by_bin[b])
                 vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
-            jk_vectors.append(np.concatenate(vecs))
+            xi_jk = np.concatenate(vecs)
+
+            # Update streaming accumulator (no list storage)
+            jk_accum.update(xi_jk)
+
+            # Explicit cleanup of per-iteration temporaries
+            del counts_by_bin, vecs, xi_bin, xi_jk, data_mask, rand_mask
+            gc.collect()
+
             iter_time = time.time() - iter_start
             elapsed = time.time() - jk_start
             avg_time = elapsed / (idx + 1)
             remaining = avg_time * (n_jk - idx - 1)
-            status(f"  JK {idx+1}/{n_jk} done ({iter_time:.1f}s) | elapsed: {elapsed:.0f}s | est remaining: {remaining:.0f}s", output_dir)
+            rss_now = get_rss_gb()
 
-        jk_vectors = np.asarray(jk_vectors)
-        status(f"  Jackknife complete ({time.time()-jk_start:.1f}s total)", output_dir)
-        cov_result = covariance_from_jackknife(jk_vectors)
+            # Log memory status
+            with open(mem_log_path, "a") as f:
+                f.write(f"{idx+1}, {rss_now:.3f}, {jk_accum.memory_bytes()}, {iter_time:.1f}\n")
+
+            status(f"  JK {idx+1}/{n_jk} done ({iter_time:.1f}s) RSS={rss_now:.2f}GB | elapsed: {elapsed:.0f}s | est remaining: {remaining:.0f}s", output_dir)
+
+        # Finalize covariance from streaming accumulator
+        cov_result = jk_accum.finalize()
+        status(f"  Jackknife complete ({time.time()-jk_start:.1f}s total) RSS_final={get_rss_gb():.2f}GB", output_dir)
         cov_meta.update(cov_result.meta)
 
     cov_path = cov_dir / "xi_wedge_covariance.npy"

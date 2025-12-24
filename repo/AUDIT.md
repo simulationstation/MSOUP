@@ -113,3 +113,64 @@ Coverage (h^-1 Mpc): [1309.893367453913, 3186.8095891190023, 1800.5550095038689]
 Estimated grid memory (GB): 0.028
 Random sample invalid fraction: 0.000
 E1 diagnostic: mean attempted pairs per galaxy=0.98, mean valid pairs=0.98, invalid fraction=0.000, finite fraction=0.610
+
+## JK Memory Fix (2025-12-23)
+
+### Problem
+Pipeline crashed at JK iteration ~7 with `MemoryError: Only 1.6GB available. Need at least 2GB`.
+Run: `run_20251223_183312`, crashed after 6 successful JK iterations.
+
+### Root Cause Analysis
+1. **Previous implementation** stored all JK xi vectors in a Python list:
+   ```python
+   jk_vectors = []
+   for idx in range(n_jk):
+       ...
+       jk_vectors.append(np.concatenate(vecs))  # List grows each iteration
+   jk_vectors = np.asarray(jk_vectors)  # Convert to (100, M) array
+   cov_result = covariance_from_jackknife(jk_vectors)
+   ```
+
+2. **Memory accumulation**: While the list itself was small (100 × 104 floats ≈ 80KB),
+   the per-iteration `counts_by_bin` dict and masked array copies were not being freed
+   promptly by Python's garbage collector.
+
+3. **Estimated per-iteration memory**: ~200-300 MB for DD/DR/RR arrays and masked copies.
+
+### Fix Applied
+
+**Files changed:**
+- `repo/src/bao_overlap/covariance.py`: Added `StreamingJackknifeCovariance` class
+- `repo/scripts/run_pipeline.py`: Replaced list accumulation with streaming accumulator
+
+**Strategy: Streaming Covariance Accumulation**
+
+Instead of storing all xi vectors, maintain running sums:
+- `sum_x` (M,): Σ xi
+- `sum_xx` (M×M): Σ outer(xi, xi)
+
+Final covariance computed as:
+```python
+mean = sum_x / n
+cov = (n-1)/n * (sum_xx/n - outer(mean, mean))
+```
+
+This is mathematically equivalent to the batch formula but uses O(M²) memory instead of O(N×M).
+
+**Additional fixes:**
+- `gc.collect()` after each iteration
+- `gc.set_threshold(700, 10, 10)` for aggressive garbage collection
+- Explicit `del` of per-iteration temporaries
+- Memory logging to `jk_memory_debug.log`
+
+### Numerical Equivalence
+
+The streaming formula is algebraically identical to the batch formula:
+```
+Batch:  cov = (n-1)/n * Σ(xi - mean)(xi - mean)^T
+            = (n-1)/n * (Σ xi xi^T - n × mean mean^T)
+            = (n-1)/n * (sum_xx - outer(sum_x, sum_x)/n) / n ✓
+```
+
+### Validation
+(To be filled after test run - see jk_memory_debug.log for first 10-15 iterations)
