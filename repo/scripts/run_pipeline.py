@@ -318,6 +318,32 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     with open(output_dir / "environment_assignment_diagnostics.json", "w", encoding="utf-8") as handle:
         json.dump(env_diag, handle, indent=2)
 
+    # Aggressive memory cleanup before pair counts
+    status("  Memory cleanup before pair counts...", output_dir)
+    import gc
+    gc.collect()
+
+    # Terminate any lingering joblib workers
+    try:
+        from joblib.externals.loky import get_reusable_executor
+        get_reusable_executor().shutdown(wait=True)
+        status("  Worker pool terminated", output_dir)
+    except Exception:
+        pass
+
+    gc.collect()
+
+    # Check available memory
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    available_gb = int(line.split()[1]) / 1e6
+                    status(f"  Available memory: {available_gb:.1f} GB", output_dir)
+                    break
+    except FileNotFoundError:
+        pass
+
     status("STAGE 2: Computing pair counts by environment bin", output_dir)
     counts_by_region = {}
     counts_all_regions = []

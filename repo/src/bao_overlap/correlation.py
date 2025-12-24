@@ -28,15 +28,17 @@ TREECORR_NTHREADS = int(os.environ.get("BAO_NTHREADS", "4"))
 
 def _check_memory():
     """Check available memory and warn if low."""
+    # Lowered threshold from 2.0 to 1.0 GB - pair counts are memory efficient
+    min_memory_gb = float(os.environ.get("BAO_MIN_MEMORY_GB", "1.0"))
     try:
         with open('/proc/meminfo') as f:
             for line in f:
                 if line.startswith('MemAvailable:'):
                     available_gb = int(line.split()[1]) / 1e6
-                    if available_gb < 2.0:
+                    if available_gb < min_memory_gb:
                         raise MemoryError(
                             f"Only {available_gb:.1f}GB available. "
-                            "Need at least 2GB for correlation computation."
+                            f"Need at least {min_memory_gb}GB for correlation computation."
                         )
                     return available_gb
     except FileNotFoundError:

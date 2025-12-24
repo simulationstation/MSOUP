@@ -273,9 +273,20 @@ def compute_per_galaxy_mean_e1(
     valid_count = np.sum(np.isfinite(per_galaxy))
     print(f"    [E1 parallel] Done: {valid_count}/{n_gal} valid", flush=True)
 
-    # Force garbage collection to release parallel worker memory
+    # Force garbage collection and terminate joblib workers to release memory
+    del results  # Explicitly delete results list
     import gc
     gc.collect()
+
+    # Kill the joblib worker pool to release memory
+    try:
+        from joblib.externals.loky import get_reusable_executor
+        get_reusable_executor().shutdown(wait=True)
+        print("    [E1 parallel] Worker pool terminated", flush=True)
+    except Exception as e:
+        print(f"    [E1 parallel] Warning: Could not terminate worker pool: {e}", flush=True)
+
+    gc.collect()  # Collect again after worker termination
 
     meta = {
         "attempted_pairs": attempted,
