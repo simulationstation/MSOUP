@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, Tuple, Any
 
 import numpy as np
 from scipy.ndimage import label
+from joblib import Parallel, delayed
 
 from .density_field import DensityField, line_integral, trilinear_sample
+
+# Number of parallel workers (default to CPU count - 1, minimum 1)
+N_JOBS = max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4)))
 
 
 @dataclass
@@ -138,6 +144,67 @@ def compute_pair_e1(
     return integral / length, True, outside_fraction
 
 
+def _process_single_galaxy(
+    idx: int,
+    galaxy_xyz: np.ndarray,
+    field_grid: np.ndarray,
+    field_origin: np.ndarray,
+    field_cell_sizes: np.ndarray,
+    s_min: float,
+    s_max: float,
+    step: float,
+    max_outside_fraction: float,
+    max_pairs_per_galaxy: int,
+    candidate_multiplier: int,
+    seed: int,
+) -> Tuple[int, float, int, int, int]:
+    """Process a single galaxy's E1 computation. Returns (idx, e1_mean, attempted, valid, invalid)."""
+    n_gal = len(galaxy_xyz)
+    rng = np.random.default_rng(seed + idx)
+
+    # Reconstruct a minimal field-like object for line_integral
+    class FieldProxy:
+        def __init__(self, grid, origin, cell_sizes):
+            self.grid = grid
+            self.origin = origin
+            self.cell_sizes = cell_sizes
+
+    field = FieldProxy(field_grid, field_origin, field_cell_sizes)
+
+    n_candidates = min(n_gal - 1, max_pairs_per_galaxy * candidate_multiplier)
+    raw_choices = rng.choice(n_gal - 1, size=n_candidates, replace=False)
+    neighbor_idx = np.where(raw_choices >= idx, raw_choices + 1, raw_choices)
+    offsets = galaxy_xyz[neighbor_idx] - galaxy_xyz[idx]
+    distances = np.linalg.norm(offsets, axis=1)
+    in_range = (distances >= s_min) & (distances <= s_max)
+    neighbor_idx = neighbor_idx[in_range][:max_pairs_per_galaxy]
+
+    if neighbor_idx.size == 0:
+        return (idx, np.nan, 0, 0, 0)
+
+    attempted = neighbor_idx.size
+    valid_count = 0
+    invalid_count = 0
+    e_values = []
+
+    for jdx in neighbor_idx:
+        e_val, is_valid, _ = compute_pair_e1(
+            field=field,
+            p0=galaxy_xyz[idx],
+            p1=galaxy_xyz[jdx],
+            step=step,
+            max_outside_fraction=max_outside_fraction,
+        )
+        if is_valid:
+            e_values.append(e_val)
+            valid_count += 1
+        else:
+            invalid_count += 1
+
+    mean_e1 = float(np.mean(e_values)) if e_values else np.nan
+    return (idx, mean_e1, attempted, valid_count, invalid_count)
+
+
 def compute_per_galaxy_mean_e1(
     field: DensityField,
     galaxy_xyz: np.ndarray,
@@ -149,7 +216,7 @@ def compute_per_galaxy_mean_e1(
     max_outside_fraction: float,
     max_pairs_per_galaxy: int | None = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Compute per-galaxy mean E1 across BAO-range pairs."""
+    """Compute per-galaxy mean E1 across BAO-range pairs (parallelized)."""
     n_gal = len(galaxy_xyz)
     per_galaxy = np.full(n_gal, np.nan, dtype="f8")
     attempted = np.zeros(n_gal, dtype=int)
@@ -168,36 +235,43 @@ def compute_per_galaxy_mean_e1(
     max_pairs_per_galaxy = min(max_pairs_per_galaxy, n_gal - 1)
     candidate_multiplier = 5
 
-    for idx in range(n_gal):
-        n_candidates = min(n_gal - 1, max_pairs_per_galaxy * candidate_multiplier)
-        raw_choices = rng.choice(n_gal - 1, size=n_candidates, replace=False)
-        neighbor_idx = np.where(raw_choices >= idx, raw_choices + 1, raw_choices)
-        offsets = galaxy_xyz[neighbor_idx] - galaxy_xyz[idx]
-        distances = np.linalg.norm(offsets, axis=1)
-        in_range = (distances >= s_min) & (distances <= s_max)
-        neighbor_idx = neighbor_idx[in_range][:max_pairs_per_galaxy]
+    # Get base seed for reproducibility
+    base_seed = rng.integers(0, 2**31)
 
-        if neighbor_idx.size == 0:
-            continue
+    # Progress tracking
+    n_jobs = N_JOBS
+    print(f"    [E1 parallel] Starting {n_gal} galaxies on {n_jobs} workers...", flush=True)
 
-        attempted[idx] = neighbor_idx.size
-        e_values = []
-        for jdx in neighbor_idx:
-            e_val, is_valid, _ = compute_pair_e1(
-                field=field,
-                p0=galaxy_xyz[idx],
-                p1=galaxy_xyz[jdx],
-                step=step,
-                max_outside_fraction=max_outside_fraction,
-            )
-            if is_valid:
-                e_values.append(e_val)
-                valid[idx] += 1
-            else:
-                invalid[idx] += 1
+    # Run in parallel with progress reporting
+    batch_size = max(1000, n_gal // 100)  # Report every ~1%
 
-        if e_values:
-            per_galaxy[idx] = float(np.mean(e_values))
+    results = Parallel(n_jobs=n_jobs, verbose=0, batch_size="auto")(
+        delayed(_process_single_galaxy)(
+            idx=idx,
+            galaxy_xyz=galaxy_xyz,
+            field_grid=field.grid,
+            field_origin=field.origin,
+            field_cell_sizes=field.cell_sizes,
+            s_min=s_min,
+            s_max=s_max,
+            step=step,
+            max_outside_fraction=max_outside_fraction,
+            max_pairs_per_galaxy=max_pairs_per_galaxy,
+            candidate_multiplier=candidate_multiplier,
+            seed=base_seed,
+        )
+        for idx in range(n_gal)
+    )
+
+    # Unpack results
+    for idx, mean_e1, att, val, inv in results:
+        per_galaxy[idx] = mean_e1
+        attempted[idx] = att
+        valid[idx] = val
+        invalid[idx] = inv
+
+    valid_count = np.sum(np.isfinite(per_galaxy))
+    print(f"    [E1 parallel] Done: {valid_count}/{n_gal} valid", flush=True)
 
     meta = {
         "attempted_pairs": attempted,
@@ -205,6 +279,7 @@ def compute_per_galaxy_mean_e1(
         "invalid_pairs": invalid,
         "max_pairs_per_galaxy": max_pairs_per_galaxy,
         "max_outside_fraction": max_outside_fraction,
+        "n_parallel_jobs": n_jobs,
     }
     return per_galaxy, meta
 

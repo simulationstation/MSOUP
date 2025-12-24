@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+from joblib import Parallel, delayed
+
+# Number of parallel workers
+N_JOBS = max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4)))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:
@@ -50,6 +56,48 @@ from bao_overlap.reporting import scan_forbidden_keys_in_dir, write_methods_snap
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _jk_iteration(
+    idx: int,
+    data_xyz_all: np.ndarray,
+    rand_xyz_all: np.ndarray,
+    env_bin_all: np.ndarray,
+    rand_bin_all: np.ndarray,
+    data_w_all: np.ndarray,
+    rand_w_all: np.ndarray,
+    jk_data_regions: np.ndarray,
+    jk_rand_regions: np.ndarray,
+    n_bins: int,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    tangential_bounds: tuple,
+    precomputed_rr: np.ndarray,
+) -> np.ndarray:
+    """Compute xi wedge vector for a single JK iteration (for parallel execution)."""
+    data_mask = jk_data_regions != idx
+    rand_mask = jk_rand_regions != idx
+
+    counts_by_bin = compute_pair_counts_by_environment(
+        data_xyz_all[data_mask],
+        rand_xyz_all[rand_mask],
+        env_bin_all[data_mask],
+        rand_bin_all[rand_mask],
+        n_bins=n_bins,
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        data_weights=data_w_all[data_mask],
+        rand_weights=rand_w_all[rand_mask],
+        verbose=False,
+        pair_counter=compute_pair_counts_simple,
+        precomputed_rr=precomputed_rr,
+    )
+
+    vecs = []
+    for b in range(n_bins):
+        xi_bin = landy_szalay(counts_by_bin[b])
+        vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
+    return np.concatenate(vecs)
 
 
 def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
@@ -464,52 +512,36 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         jk_start = time.time()
         rss_start = get_rss_gb()
 
-        for idx in range(n_jk):
-            iter_start = time.time()
-            data_mask = jk_data_regions != idx
-            rand_mask = jk_rand_regions != idx
+        # --- PARALLEL JK ITERATIONS ---
+        status(f"  [JK parallel] Starting {n_jk} iterations on {N_JOBS} workers...", output_dir)
 
-            # Compute pair counts (these are the large temporaries)
-            counts_by_bin = compute_pair_counts_by_environment(
-                data_xyz_all[data_mask],
-                rand_xyz_all[rand_mask],
-                env_bin_all[data_mask],
-                rand_bin_all[rand_mask],
+        jk_results = Parallel(n_jobs=N_JOBS, verbose=10, batch_size=1)(
+            delayed(_jk_iteration)(
+                idx=idx,
+                data_xyz_all=data_xyz_all,
+                rand_xyz_all=rand_xyz_all,
+                env_bin_all=env_bin_all,
+                rand_bin_all=rand_bin_all,
+                data_w_all=data_w_all,
+                rand_w_all=rand_w_all,
+                jk_data_regions=jk_data_regions,
+                jk_rand_regions=jk_rand_regions,
                 n_bins=n_bins,
                 s_edges=s_edges,
                 mu_edges=mu_edges,
-                data_weights=data_w_all[data_mask],
-                rand_weights=rand_w_all[rand_mask],
-                verbose=False,
-                pair_counter=compute_pair_counts_simple,
+                tangential_bounds=tangential_bounds,
                 precomputed_rr=precomputed_rr,
             )
+            for idx in range(n_jk)
+        )
 
-            # Extract xi wedge vector for this JK sample
-            vecs = []
-            for b in range(n_bins):
-                xi_bin = landy_szalay(counts_by_bin[b])
-                vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
-            xi_jk = np.concatenate(vecs)
-
-            # Update streaming accumulator (no list storage)
+        # Update streaming accumulator with all results
+        for idx, xi_jk in enumerate(jk_results):
             jk_accum.update(xi_jk)
 
-            # Explicit cleanup of per-iteration temporaries
-            del counts_by_bin, vecs, xi_bin, xi_jk, data_mask, rand_mask
-            gc.collect()
-
-            iter_time = time.time() - iter_start
-            elapsed = time.time() - jk_start
-            avg_time = elapsed / (idx + 1)
-            remaining = avg_time * (n_jk - idx - 1)
-            rss_now = get_rss_gb()
-
-            # Log memory status
-            with open(mem_log_path, "a") as f:
-                f.write(f"{idx+1}, {rss_now:.3f}, {jk_accum.memory_bytes()}, {iter_time:.1f}\n")
-
-            status(f"  JK {idx+1}/{n_jk} done ({iter_time:.1f}s) RSS={rss_now:.2f}GB | elapsed: {elapsed:.0f}s | est remaining: {remaining:.0f}s", output_dir)
+        rss_now = get_rss_gb()
+        with open(mem_log_path, "a") as f:
+            f.write(f"parallel_complete, {rss_now:.3f}, {jk_accum.memory_bytes()}, {time.time()-jk_start:.1f}\n")
 
         # Finalize covariance from streaming accumulator
         cov_result = jk_accum.finalize()
