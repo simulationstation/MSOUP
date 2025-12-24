@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Number of parallel workers
-N_JOBS = max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4)))
+N_JOBS = min(10, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:

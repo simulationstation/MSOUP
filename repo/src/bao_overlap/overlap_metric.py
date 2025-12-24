@@ -13,8 +13,8 @@ from joblib import Parallel, delayed
 
 from .density_field import DensityField, line_integral, trilinear_sample
 
-# Number of parallel workers (default to CPU count - 1, minimum 1)
-N_JOBS = max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4)))
+# Number of parallel workers (capped at 10 to limit memory usage)
+N_JOBS = min(10, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
 
 
 @dataclass

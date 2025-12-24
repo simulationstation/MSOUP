@@ -1,7 +1,7 @@
 preregistration: "configs/preregistration.yaml"
 datasets: "configs/datasets.yaml"
 catalog: "eboss_lrgpcmass"
-output_dir: "../today_results/run_20251224_003250"
+output_dir: "../today_results/run_20251224_015950"
 
 runtime:
   dry_run_fraction: 1.0
