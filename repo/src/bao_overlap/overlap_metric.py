@@ -273,6 +273,10 @@ def compute_per_galaxy_mean_e1(
     valid_count = np.sum(np.isfinite(per_galaxy))
     print(f"    [E1 parallel] Done: {valid_count}/{n_gal} valid", flush=True)
 
+    # Force garbage collection to release parallel worker memory
+    import gc
+    gc.collect()
+
     meta = {
         "attempted_pairs": attempted,
         "valid_pairs": valid,
