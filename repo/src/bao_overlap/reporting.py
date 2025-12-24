@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -46,3 +47,25 @@ def write_results(path: Path, results: Dict[str, Any], blind_state: BlindState) 
         payload["p_value"] = "BLINDED"
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def scan_forbidden_keys_in_dir(path: Path, forbidden: Iterable[str] = FORBIDDEN_KEYS) -> None:
+    """Scan output directory for forbidden keys using ripgrep."""
+    pattern = r'(\"(' + "|".join(forbidden) + r')\"\s*:|^\s*(' + "|".join(forbidden) + r')\s*:)'
+    cmd = [
+        "rg",
+        "-n",
+        "--glob",
+        "*.json",
+        "--glob",
+        "*.yaml",
+        "--glob",
+        "*.yml",
+        pattern,
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        raise ValueError(f"Forbidden keys detected in outputs:\n{result.stdout}")
+    if result.returncode not in (1,):
+        raise RuntimeError(f"rg failed: {result.stderr}")

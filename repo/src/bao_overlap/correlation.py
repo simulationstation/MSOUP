@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple, Optional
+from typing import Dict, Iterable, Tuple, Optional, Callable
 
 import numpy as np
-import treecorr
+try:
+    import treecorr
+    HAS_TREECORR = True
+except ImportError:  # pragma: no cover - handled via fallback
+    HAS_TREECORR = False
 
 
 # Resource limits to prevent system overload
@@ -104,6 +108,16 @@ def compute_pair_counts(
 
     data_weights = np.asarray(data_weights, dtype="f8")
     rand_weights = np.asarray(rand_weights, dtype="f8")
+
+    if not HAS_TREECORR:
+        return compute_pair_counts_bruteforce(
+            data_xyz,
+            rand_xyz,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_weights,
+            rand_weights=rand_weights,
+        )
 
     # Create TreeCorr catalogs
     data_cat = treecorr.Catalog(
@@ -245,6 +259,59 @@ def compute_pair_counts(
     )
 
 
+def _empty_pair_counts(s_edges: np.ndarray, mu_edges: np.ndarray) -> PairCounts:
+    n_s = len(s_edges) - 1
+    n_mu = len(mu_edges) - 1
+    return PairCounts(
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        dd=np.zeros((n_s, n_mu)),
+        dr=np.zeros((n_s, n_mu)),
+        rr=np.zeros((n_s, n_mu)),
+        meta={
+            "n_data": 0,
+            "n_rand": 0,
+            "sum_w_data": 0.0,
+            "sum_w_rand": 0.0,
+            "sum_w_data_sq": 0.0,
+            "sum_w_rand_sq": 0.0,
+        },
+    )
+
+
+def compute_pair_counts_by_environment(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    data_bins: np.ndarray,
+    rand_bins: np.ndarray,
+    n_bins: int,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+    verbose: bool = True,
+    pair_counter: Callable[..., PairCounts] = compute_pair_counts,
+) -> Dict[int, PairCounts]:
+    """Compute pair counts per environment bin."""
+    counts_by_bin: Dict[int, PairCounts] = {}
+    for b in range(n_bins):
+        data_mask = data_bins == b
+        rand_mask = rand_bins == b
+        if not np.any(data_mask) or not np.any(rand_mask):
+            counts_by_bin[b] = _empty_pair_counts(s_edges, mu_edges)
+            continue
+        counts_by_bin[b] = pair_counter(
+            data_xyz[data_mask],
+            rand_xyz[rand_mask],
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=None if data_weights is None else data_weights[data_mask],
+            rand_weights=None if rand_weights is None else rand_weights[rand_mask],
+            verbose=verbose,
+        )
+    return counts_by_bin
+
+
 def _rebin_rp_pi_to_s_mu(
     counts_rp_pi: np.ndarray,
     rp_centers: np.ndarray,
@@ -312,6 +379,16 @@ def compute_pair_counts_simple(
     """
     _check_memory()
 
+    if not HAS_TREECORR:
+        return compute_pair_counts_bruteforce(
+            data_xyz,
+            rand_xyz,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_weights,
+            rand_weights=rand_weights,
+        )
+
     n_data = len(data_xyz)
     n_rand = len(rand_xyz)
     n_s_bins = len(s_edges) - 1
@@ -376,6 +453,67 @@ def compute_pair_counts_simple(
             "sum_w_rand_sq": float(np.square(rand_weights).sum()),
             "mode": "1D_uniform_mu",
         },
+    )
+
+
+def compute_pair_counts_bruteforce(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+) -> PairCounts:
+    """Brute-force pair counting fallback for small samples."""
+    n_data = len(data_xyz)
+    n_rand = len(rand_xyz)
+    n_s_bins = len(s_edges) - 1
+    n_mu_bins = len(mu_edges) - 1
+
+    if data_weights is None:
+        data_weights = np.ones(n_data)
+    if rand_weights is None:
+        rand_weights = np.ones(n_rand)
+
+    dd = np.zeros((n_s_bins, n_mu_bins))
+    dr = np.zeros((n_s_bins, n_mu_bins))
+    rr = np.zeros((n_s_bins, n_mu_bins))
+
+    def _accumulate(xyz_a, xyz_b, w_a, w_b, counts, symmetric: bool = False) -> None:
+        for i in range(len(xyz_a)):
+            j_start = i + 1 if symmetric else 0
+            for j in range(j_start, len(xyz_b)):
+                diff = xyz_b[j] - xyz_a[i]
+                s = np.linalg.norm(diff)
+                if s == 0.0:
+                    continue
+                mu = abs(diff[2]) / s
+                s_idx = np.searchsorted(s_edges, s) - 1
+                mu_idx = np.searchsorted(mu_edges, mu) - 1
+                if 0 <= s_idx < n_s_bins and 0 <= mu_idx < n_mu_bins:
+                    counts[s_idx, mu_idx] += w_a[i] * w_b[j]
+
+    _accumulate(data_xyz, data_xyz, data_weights, data_weights, dd, symmetric=True)
+    _accumulate(data_xyz, rand_xyz, data_weights, rand_weights, dr, symmetric=False)
+    _accumulate(rand_xyz, rand_xyz, rand_weights, rand_weights, rr, symmetric=True)
+
+    meta = {
+        "n_data": n_data,
+        "n_rand": n_rand,
+        "sum_w_data": float(np.sum(data_weights)),
+        "sum_w_rand": float(np.sum(rand_weights)),
+        "sum_w_data_sq": float(np.sum(np.square(data_weights))),
+        "sum_w_rand_sq": float(np.sum(np.square(rand_weights))),
+        "mode": "bruteforce",
+    }
+
+    return PairCounts(
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        dd=dd,
+        dr=dr,
+        rr=rr,
+        meta=meta,
     )
 
 

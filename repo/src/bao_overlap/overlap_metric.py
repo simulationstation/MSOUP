@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 import numpy as np
 from scipy.ndimage import label
@@ -16,6 +16,13 @@ class EnvironmentResult:
     per_galaxy: np.ndarray
     per_pair: np.ndarray
     meta: Dict[str, float]
+
+
+@dataclass
+class EnvironmentAssignment:
+    per_galaxy_raw: np.ndarray
+    per_galaxy_norm: np.ndarray
+    meta: Dict[str, Any]
 
 
 def compute_e1(
@@ -31,8 +38,9 @@ def compute_e1(
         pairs = pairs[keep]
     e_values = np.zeros(len(pairs), dtype="f4")
     for idx, (p0, p1) in enumerate(pairs):
-        integral = line_integral(field, p0, p1, step)
-        e_values[idx] = integral
+        integral, _ = line_integral(field, p0, p1, step)
+        length = np.linalg.norm(p1 - p0)
+        e_values[idx] = integral / length if length > 0 else 0.0
     return e_values
 
 
@@ -70,9 +78,10 @@ def compute_e2(field: DensityField, pairs: np.ndarray, delta_threshold: float, m
 def normalize(values: np.ndarray, method: str = "mean_std") -> Tuple[np.ndarray, Dict[str, float]]:
     if method == "median_mad":
         median = float(np.median(values))
-        mad = float(np.median(np.abs(values - median))) if np.any(values) else 1.0
-        mad = mad if mad > 0 else 1.0
-        return (values - median) / mad, {"median": median, "mad": mad}
+        mad_raw = float(np.median(np.abs(values - median))) if np.any(values) else 1.0
+        mad_raw = mad_raw if mad_raw > 0 else 1.0
+        scale = 1.4826 * mad_raw
+        return (values - median) / scale, {"median": median, "mad": mad_raw, "scale": scale}
     mean = float(np.mean(values))
     std = float(np.std(values)) if np.std(values) > 0 else 1.0
     return (values - mean) / std, {"mean": mean, "std": std}
@@ -109,3 +118,127 @@ def compute_environment(
             meta.update({f"{primary}_median": stats["median"], f"{primary}_mad": stats["mad"]})
 
     return EnvironmentResult(per_galaxy=per_galaxy, per_pair=primary_values, meta=meta)
+
+
+def compute_pair_e1(
+    field: DensityField,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    step: float,
+    max_outside_fraction: float,
+) -> Tuple[float, bool, float]:
+    """Compute E1 for a single pair with mask handling."""
+    integral, outside_fraction = line_integral(field, p0, p1, step)
+    length = float(np.linalg.norm(p1 - p0))
+    if length == 0.0:
+        return 0.0, False, outside_fraction
+    if outside_fraction > max_outside_fraction:
+        return np.nan, False, outside_fraction
+    return integral / length, True, outside_fraction
+
+
+def compute_per_galaxy_mean_e1(
+    field: DensityField,
+    galaxy_xyz: np.ndarray,
+    s_min: float,
+    s_max: float,
+    step: float,
+    rng: np.random.Generator,
+    pair_subsample_fraction: float,
+    max_outside_fraction: float,
+    max_pairs_per_galaxy: int | None = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Compute per-galaxy mean E1 across BAO-range pairs."""
+    n_gal = len(galaxy_xyz)
+    per_galaxy = np.full(n_gal, np.nan, dtype="f8")
+    attempted = np.zeros(n_gal, dtype=int)
+    valid = np.zeros(n_gal, dtype=int)
+    invalid = np.zeros(n_gal, dtype=int)
+
+    if n_gal < 2:
+        return per_galaxy, {
+            "attempted_pairs": attempted,
+            "valid_pairs": valid,
+            "invalid_pairs": invalid,
+        }
+
+    if max_pairs_per_galaxy is None:
+        max_pairs_per_galaxy = max(1, int(pair_subsample_fraction * (n_gal - 1)))
+    max_pairs_per_galaxy = min(max_pairs_per_galaxy, n_gal - 1)
+    candidate_multiplier = 5
+
+    for idx in range(n_gal):
+        n_candidates = min(n_gal - 1, max_pairs_per_galaxy * candidate_multiplier)
+        raw_choices = rng.choice(n_gal - 1, size=n_candidates, replace=False)
+        neighbor_idx = np.where(raw_choices >= idx, raw_choices + 1, raw_choices)
+        offsets = galaxy_xyz[neighbor_idx] - galaxy_xyz[idx]
+        distances = np.linalg.norm(offsets, axis=1)
+        in_range = (distances >= s_min) & (distances <= s_max)
+        neighbor_idx = neighbor_idx[in_range][:max_pairs_per_galaxy]
+
+        if neighbor_idx.size == 0:
+            continue
+
+        attempted[idx] = neighbor_idx.size
+        e_values = []
+        for jdx in neighbor_idx:
+            e_val, is_valid, _ = compute_pair_e1(
+                field=field,
+                p0=galaxy_xyz[idx],
+                p1=galaxy_xyz[jdx],
+                step=step,
+                max_outside_fraction=max_outside_fraction,
+            )
+            if is_valid:
+                e_values.append(e_val)
+                valid[idx] += 1
+            else:
+                invalid[idx] += 1
+
+        if e_values:
+            per_galaxy[idx] = float(np.mean(e_values))
+
+    meta = {
+        "attempted_pairs": attempted,
+        "valid_pairs": valid,
+        "invalid_pairs": invalid,
+        "max_pairs_per_galaxy": max_pairs_per_galaxy,
+        "max_outside_fraction": max_outside_fraction,
+    }
+    return per_galaxy, meta
+
+
+def assign_environment(
+    field: DensityField,
+    galaxy_xyz: np.ndarray,
+    s_min: float,
+    s_max: float,
+    step: float,
+    rng: np.random.Generator,
+    pair_subsample_fraction: float,
+    max_outside_fraction: float,
+    normalization_method: str,
+    max_pairs_per_galaxy: int | None = None,
+) -> EnvironmentAssignment:
+    """Compute per-galaxy mean E1 and normalization."""
+    per_galaxy_raw, meta = compute_per_galaxy_mean_e1(
+        field=field,
+        galaxy_xyz=galaxy_xyz,
+        s_min=s_min,
+        s_max=s_max,
+        step=step,
+        rng=rng,
+        pair_subsample_fraction=pair_subsample_fraction,
+        max_outside_fraction=max_outside_fraction,
+        max_pairs_per_galaxy=max_pairs_per_galaxy,
+    )
+
+    valid_mask = np.isfinite(per_galaxy_raw)
+    normed = np.full_like(per_galaxy_raw, np.nan, dtype="f8")
+    stats = {}
+    if np.any(valid_mask):
+        normed_vals, stats = normalize(per_galaxy_raw[valid_mask], method=normalization_method)
+        normed[valid_mask] = normed_vals
+    meta.update(stats)
+    meta["normalization_method"] = normalization_method
+    return EnvironmentAssignment(per_galaxy_raw=per_galaxy_raw, per_galaxy_norm=normed, meta=meta)

@@ -49,7 +49,7 @@ def main() -> None:
         return
 
     if args.stage == "overlap_metric":
-        density = build_density_field(data_xyz, rand_xyz, rand_cat.w, grid_size=64, cell_size=5.0)
+        density = build_density_field(data_xyz, rand_xyz, data_cat.w, rand_cat.w, grid_size=64, cell_size=5.0)
         env_primary = prereg["environment_metric"]["primary"]
         smooth = gaussian_smooth(density, radius=env_primary["parameters"]["smoothing_radius"])
         rng = np.random.default_rng(seed)

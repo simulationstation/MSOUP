@@ -6,33 +6,28 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
 
-from bao_overlap.blinding import (
-    BlindState,
-    blind_results,
-    compute_prereg_hash,
-    initialize_blinding,
-    save_blinded_results,
-)
+from bao_overlap.blinding import BlindState, compute_prereg_hash, initialize_blinding, save_blinded_results
 from bao_overlap.correlation import (
-    bin_by_environment,
     combine_pair_counts,
-    compute_pair_counts_simple as compute_pair_counts,
+    compute_pair_counts,
+    compute_pair_counts_by_environment,
     landy_szalay,
     parse_wedge_bounds,
     wedge_xi,
 )
 from bao_overlap.covariance import assign_jackknife_regions, covariance_from_jackknife, covariance_from_mocks
-from bao_overlap.density_field import build_density_field, gaussian_smooth
+from bao_overlap.density_field import build_density_field, gaussian_smooth, save_density_field, trilinear_sample
 from bao_overlap.fitting import fit_wedge
 from bao_overlap.geometry import radec_to_cartesian
-from bao_overlap.hierarchical import bayesian_beta, two_step_beta
-from bao_overlap.io import load_run_config, load_catalog, save_metadata
-from bao_overlap.overlap_metric import compute_environment
-from bao_overlap.plotting import plot_beta_null, plot_wedge
-from bao_overlap.reporting import write_methods_snapshot, write_results
+from bao_overlap.hierarchical import infer_beta_blinded
+from bao_overlap.io import load_catalog, load_yaml, save_metadata
+from bao_overlap.overlap_metric import compute_per_galaxy_mean_e1, normalize
+from bao_overlap.prereg import load_prereg
+from bao_overlap.reporting import scan_forbidden_keys_in_dir, write_methods_snapshot
 
 
 def _ensure_dir(path: Path) -> None:
@@ -40,36 +35,61 @@ def _ensure_dir(path: Path) -> None:
 
 
 def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
-    cfg = load_run_config(config_path)
-    prereg = cfg["_preregistration"]
-    datasets = cfg["_datasets"]
+    cfg = load_yaml(config_path)
+    prereg = load_prereg(cfg["preregistration"])
+    datasets = load_yaml(cfg["datasets"])
+    cfg["_preregistration"] = prereg
+    cfg["_datasets"] = datasets
 
     output_dir = Path(cfg["output_dir"])
     _ensure_dir(output_dir)
 
     seed = prereg["random_seed"]
     rng = np.random.default_rng(seed)
+    prereg_hash = compute_prereg_hash(Path(cfg["preregistration"]))
+    (output_dir / "prereg_hash.txt").write_text(prereg_hash, encoding="utf-8")
 
-    dry_run_fraction = cfg["runtime"].get("dry_run_fraction") if dry_run else None
+    dry_run_fraction = cfg.get("runtime", {}).get("dry_run_fraction") if dry_run else None
     regions = prereg["primary_dataset"]["regions"]
 
     cosmo_cfg = prereg["fiducial_cosmology"]
     env_primary = prereg["environment_metric"]["primary"]
     env_params = env_primary["parameters"]
     normalization_method = env_primary["normalization"]["method"]
-    primary_metric = env_primary["name"]
     smoothing_radius = env_params["smoothing_radius"]
+    line_step = env_params["line_integral_step"]
+    pair_subsample_fraction = env_params["pair_subsample_fraction"]
 
-    all_env = []
-    data_xyz_all = []
-    rand_xyz_all = []
-    data_ra_all = []
-    data_dec_all = []
-    rand_ra_all = []
-    rand_dec_all = []
-    data_w_all = []
-    rand_w_all = []
-    counts_list = []
+    fit_cfg = prereg["bao_fitting"]
+    fit_range = (fit_cfg["fit_range"]["s_min"], fit_cfg["fit_range"]["s_max"])
+    nuisance_terms = fit_cfg["nuisance"]["terms"]
+
+    corr_cfg = prereg["correlation"]["binning"]
+    s_edges = np.arange(corr_cfg["s_min"], corr_cfg["s_max"] + corr_cfg["s_bin"], corr_cfg["s_bin"])
+    mu_edges = np.arange(corr_cfg["mu_min"], corr_cfg["mu_max"] + corr_cfg["mu_bin"], corr_cfg["mu_bin"])
+    s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+
+    wedge_cfg = prereg["correlation"]["wedges"]
+    tangential_bounds = parse_wedge_bounds(wedge_cfg["tangential"])
+    radial_bounds = parse_wedge_bounds(wedge_cfg["radial"])
+
+    n_bins = prereg["environment_binning"]["n_bins"]
+    quantile_edges = np.asarray(prereg["environment_binning"]["quantile_edges"], dtype="f8")
+
+    max_outside_fraction = 0.2
+    grid_size = 64
+    cell_size = 5.0
+
+    per_region = {}
+    all_env_raw = []
+    all_ra = []
+    all_dec = []
+    all_z = []
+    all_region = []
+    all_xyz = []
+    all_rand_xyz = []
+    all_data_w = []
+    all_rand_w = []
 
     for region in regions:
         data_cat, rand_cat = load_catalog(
@@ -83,99 +103,248 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
         rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
 
-        density = build_density_field(data_xyz, rand_xyz, rand_cat.w, grid_size=64, cell_size=5.0)
-        smooth = gaussian_smooth(density, radius=smoothing_radius)
-
-        pair_indices = rng.choice(len(data_xyz), size=min(200, len(data_xyz)), replace=False)
-        pairs = np.stack([data_xyz[pair_indices], data_xyz[pair_indices[::-1]]], axis=1)
-
-        env = compute_environment(
-            field=smooth,
-            galaxy_xyz=data_xyz,
-            pair_xyz=pairs,
-            step=env_params["line_integral_step"],
-            rng=rng,
-            subsample=env_params["pair_subsample_fraction"],
-            delta_threshold=prereg["environment_metric"]["secondary"]["parameters"]["delta_threshold"],
-            min_volume=10,
-            normalize_output=True,
-            normalization_method=normalization_method,
-            primary=primary_metric,
-        )
-
-        corr_cfg = prereg["correlation"]["binning"]
-        s_edges = np.arange(
-            corr_cfg["s_min"],
-            corr_cfg["s_max"] + corr_cfg["s_bin"],
-            corr_cfg["s_bin"],
-        )
-        mu_edges = np.arange(
-            corr_cfg["mu_min"],
-            corr_cfg["mu_max"] + corr_cfg["mu_bin"],
-            corr_cfg["mu_bin"],
-        )
-
-        counts = compute_pair_counts(
+        density = build_density_field(
             data_xyz,
             rand_xyz,
+            data_cat.w,
+            rand_cat.w,
+            grid_size=grid_size,
+            cell_size=cell_size,
+        )
+        smooth = gaussian_smooth(density, radius=smoothing_radius)
+        save_density_field(
+            output_dir / f"density_field_{region}.npz",
+            smooth,
+            meta={
+                "region": region,
+                "grid_size": grid_size,
+                "cell_size": cell_size,
+                "smoothing_radius": smoothing_radius,
+                "line_integral_step": line_step,
+            },
+        )
+
+        env_raw, env_meta = compute_per_galaxy_mean_e1(
+            field=smooth,
+            galaxy_xyz=data_xyz,
+            s_min=fit_range[0],
+            s_max=fit_range[1],
+            step=line_step,
+            rng=rng,
+            pair_subsample_fraction=pair_subsample_fraction,
+            max_outside_fraction=max_outside_fraction,
+        )
+
+        rand_local = trilinear_sample(smooth, rand_xyz)
+
+        per_region[region] = {
+            "data": data_cat,
+            "randoms": rand_cat,
+            "data_xyz": data_xyz,
+            "rand_xyz": rand_xyz,
+            "env_raw": env_raw,
+            "env_meta": env_meta,
+            "rand_local": rand_local,
+        }
+        all_env_raw.append(env_raw)
+        all_ra.append(data_cat.ra)
+        all_dec.append(data_cat.dec)
+        all_z.append(data_cat.z)
+        all_region.append(np.full(len(data_cat.ra), region))
+        all_xyz.append(data_xyz)
+        all_rand_xyz.append(rand_xyz)
+        all_data_w.append(data_cat.w)
+        all_rand_w.append(rand_cat.w)
+
+    env_raw_all = np.concatenate(all_env_raw)
+    valid_mask = np.isfinite(env_raw_all)
+    env_norm_all = np.full_like(env_raw_all, np.nan, dtype="f8")
+    norm_stats: Dict[str, float] = {}
+    if np.any(valid_mask):
+        env_norm_all[valid_mask], norm_stats = normalize(env_raw_all[valid_mask], method=normalization_method)
+
+    env_bin_edges = np.quantile(env_norm_all[valid_mask], quantile_edges)
+    env_bin_centers = 0.5 * (env_bin_edges[:-1] + env_bin_edges[1:])
+
+    def _assign_bins(values: np.ndarray) -> np.ndarray:
+        bins = np.full_like(values, -1, dtype=int)
+        valid = np.isfinite(values)
+        if np.any(valid):
+            bins[valid] = np.clip(
+                np.digitize(values[valid], env_bin_edges[1:-1], right=False),
+                0,
+                n_bins - 1,
+            )
+        return bins
+
+    env_bins_all = _assign_bins(env_norm_all)
+
+    offset = 0
+    for region in regions:
+        n_reg = len(per_region[region]["env_raw"])
+        reg_slice = slice(offset, offset + n_reg)
+        per_region[region]["env_norm"] = env_norm_all[reg_slice]
+        per_region[region]["env_bin"] = env_bins_all[reg_slice]
+        rand_norm = np.full_like(per_region[region]["rand_local"], np.nan, dtype="f8")
+        if np.any(valid_mask):
+            scale = norm_stats.get("scale") or norm_stats.get("std") or 1.0
+            center = norm_stats.get("median", norm_stats.get("mean", 0.0))
+            rand_norm = (per_region[region]["rand_local"] - center) / scale
+        per_region[region]["rand_bin"] = _assign_bins(rand_norm)
+        offset += n_reg
+
+    galaxy_id = np.arange(len(env_raw_all))
+    e_by_galaxy_path = output_dir / "E_by_galaxy.npz"
+    np.savez(
+        e_by_galaxy_path,
+        galaxy_id=galaxy_id,
+        region=np.concatenate(all_region),
+        z=np.concatenate(all_z),
+        ra=np.concatenate(all_ra),
+        dec=np.concatenate(all_dec),
+        E1_raw=env_raw_all,
+        E1_value=env_norm_all,
+        E_bin=env_bins_all,
+        E_bin_edges=env_bin_edges,
+        E_bin_centers=env_bin_centers,
+        normalization_method=np.array([normalization_method], dtype=object),
+        normalization_median=np.array([norm_stats.get("median", np.nan)], dtype="f8"),
+        normalization_mad=np.array([norm_stats.get("mad", np.nan)], dtype="f8"),
+        normalization_scale=np.array([norm_stats.get("scale", np.nan)], dtype="f8"),
+    )
+
+    env_diag: Dict[str, Any] = {}
+    for region in regions:
+        meta = per_region[region]["env_meta"]
+        attempted = meta["attempted_pairs"]
+        valid = meta["valid_pairs"]
+        invalid = meta["invalid_pairs"]
+        total_attempted = int(attempted.sum())
+        total_invalid = int(invalid.sum())
+        env_diag[region] = {
+            "mean_valid_pairs": float(np.mean(valid)) if len(valid) else 0.0,
+            "median_valid_pairs": float(np.median(valid)) if len(valid) else 0.0,
+            "min_valid_pairs": int(np.min(valid)) if len(valid) else 0,
+            "max_valid_pairs": int(np.max(valid)) if len(valid) else 0,
+            "invalid_fraction": float(total_invalid / max(total_attempted, 1)),
+        }
+    with open(output_dir / "environment_assignment_diagnostics.json", "w", encoding="utf-8") as handle:
+        json.dump(env_diag, handle, indent=2)
+
+    counts_by_region = {}
+    counts_all_regions = []
+    for region in regions:
+        region_payload = per_region[region]
+        counts_by_bin = compute_pair_counts_by_environment(
+            region_payload["data_xyz"],
+            region_payload["rand_xyz"],
+            region_payload["env_bin"],
+            region_payload["rand_bin"],
+            n_bins=n_bins,
             s_edges=s_edges,
             mu_edges=mu_edges,
-            data_weights=data_cat.w,
-            rand_weights=rand_cat.w,
+            data_weights=region_payload["data"].w,
+            rand_weights=region_payload["randoms"].w,
+            verbose=False,
+            pair_counter=compute_pair_counts,
         )
-        counts_list.append(counts)
+        counts_by_region[region] = counts_by_bin
+        counts_all_regions.append(
+            compute_pair_counts(
+                region_payload["data_xyz"],
+                region_payload["rand_xyz"],
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                data_weights=region_payload["data"].w,
+                rand_weights=region_payload["randoms"].w,
+                verbose=False,
+            )
+        )
 
-        all_env.append(env.per_galaxy)
-        data_xyz_all.append(data_xyz)
-        rand_xyz_all.append(rand_xyz)
-        data_ra_all.append(data_cat.ra)
-        data_dec_all.append(data_cat.dec)
-        rand_ra_all.append(rand_cat.ra)
-        rand_dec_all.append(rand_cat.dec)
-        data_w_all.append(data_cat.w)
-        rand_w_all.append(rand_cat.w)
+    counts_by_bin_combined = {}
+    for b in range(n_bins):
+        counts_by_bin_combined[b] = combine_pair_counts([counts_by_region[reg][b] for reg in regions])
 
-    combined_counts = combine_pair_counts(counts_list)
-    xi = landy_szalay(combined_counts)
+    combined_counts = combine_pair_counts(counts_all_regions)
+    xi_all = landy_szalay(combined_counts)
+    xi_tangential_all = wedge_xi(xi_all, mu_edges, tangential_bounds)
+    xi_radial_all = wedge_xi(xi_all, mu_edges, radial_bounds)
 
-    wedges = prereg["correlation"]["wedges"]
-    tangential_bounds = parse_wedge_bounds(wedges["tangential"])
-    tangential = wedge_xi(xi, mu_edges, tangential_bounds)
+    xi_tangential = np.zeros((n_bins, len(s_centers)))
+    xi_radial = np.zeros((n_bins, len(s_centers)))
 
-    s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+    for b in range(n_bins):
+        xi_bin = landy_szalay(counts_by_bin_combined[b])
+        xi_tangential[b] = wedge_xi(xi_bin, mu_edges, tangential_bounds)
+        xi_radial[b] = wedge_xi(xi_bin, mu_edges, radial_bounds)
 
-    env_bins = np.asarray(prereg["environment_binning"]["quantile_edges"])
-    env_values = np.concatenate(all_env)
-    env_tags = bin_by_environment(env_values, env_bins)
-    env_means = np.array([env_values[env_tags == i].mean() for i in range(len(env_bins) - 1)])
+    dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
+    dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
+    rr_combined = np.stack([counts_by_bin_combined[b].rr for b in range(n_bins)], axis=0)
 
-    template_params = {
-        "r_d": prereg["fiducial_cosmology"]["r_d"],
-        "sigma_nl": prereg["reconstruction"]["parameters"]["smoothing"],
-        "omega_m": prereg["fiducial_cosmology"]["omega_m"],
-        "omega_b": prereg["fiducial_cosmology"]["omega_b"],
-        "h": prereg["fiducial_cosmology"]["h"],
-        "n_s": prereg["fiducial_cosmology"]["n_s"],
+    pair_counts_path = output_dir / "pair_counts_by_Ebin.npz"
+    save_payload: Dict[str, Any] = {
+        "dd": dd_combined,
+        "dr": dr_combined,
+        "rr": rr_combined,
+        "s_edges": s_edges,
+        "mu_edges": mu_edges,
+        "n_bins": np.array([n_bins], dtype=int),
     }
+    for region in regions:
+        save_payload[f"dd_{region.lower()}"] = np.stack([counts_by_region[region][b].dd for b in range(n_bins)], axis=0)
+        save_payload[f"dr_{region.lower()}"] = np.stack([counts_by_region[region][b].dr for b in range(n_bins)], axis=0)
+        save_payload[f"rr_{region.lower()}"] = np.stack([counts_by_region[region][b].rr for b in range(n_bins)], axis=0)
+    np.savez(pair_counts_path, **save_payload)
+
+    xi_wedge_path = output_dir / "xi_wedge_by_Ebin.npz"
+    np.savez(
+        xi_wedge_path,
+        xi_tangential=xi_tangential,
+        xi_radial=xi_radial,
+        xi_tangential_all=xi_tangential_all,
+        xi_radial_all=xi_radial_all,
+        s_centers=s_centers,
+        mu_wedge_defs=np.array([
+            tangential_bounds[0],
+            tangential_bounds[1],
+            radial_bounds[0],
+            radial_bounds[1],
+        ]),
+        E_bin_edges=env_bin_edges,
+        E_bin_centers=env_bin_centers,
+    )
 
     cov_cfg = prereg["covariance"]
     cov_dir = output_dir / "covariance"
     cov_dir.mkdir(parents=True, exist_ok=True)
     mock_cov_path = cov_dir / "mock_xi_wedges.npy"
-    jk_cfg = cov_cfg["jackknife"]
 
-    if cov_cfg["primary_method"] == "mocks" and mock_cov_path.exists():
+    cov_method = cov_cfg["primary_method"]
+    cov_meta: Dict[str, Any] = {"method": cov_method}
+
+    if cov_method == "mocks" and mock_cov_path.exists():
         mock_wedges = np.load(mock_cov_path)
-        cov_result = covariance_from_mocks(mock_wedges)
+        if mock_wedges.ndim == 3:
+            mock_data = mock_wedges.reshape(mock_wedges.shape[0], -1)
+        else:
+            mock_data = mock_wedges
+        cov_result = covariance_from_mocks(mock_data)
+        cov_meta.update(cov_result.meta)
     else:
-        data_xyz_all = np.vstack(data_xyz_all)
-        rand_xyz_all = np.vstack(rand_xyz_all)
-        data_ra_all = np.concatenate(data_ra_all)
-        data_dec_all = np.concatenate(data_dec_all)
-        rand_ra_all = np.concatenate(rand_ra_all)
-        rand_dec_all = np.concatenate(rand_dec_all)
-        data_w_all = np.concatenate(data_w_all)
-        rand_w_all = np.concatenate(rand_w_all)
+        cov_method = cov_cfg["fallback_method"]
+        cov_meta["method"] = cov_method
+        jk_cfg = cov_cfg["jackknife"]
+        data_xyz_all = np.vstack(all_xyz)
+        rand_xyz_all = np.vstack(all_rand_xyz)
+        data_ra_all = np.concatenate(all_ra)
+        data_dec_all = np.concatenate(all_dec)
+        rand_ra_all = np.concatenate([per_region[r]["randoms"].ra for r in regions])
+        rand_dec_all = np.concatenate([per_region[r]["randoms"].dec for r in regions])
+        data_w_all = np.concatenate(all_data_w)
+        rand_w_all = np.concatenate(all_rand_w)
+        env_bin_all = env_bins_all
+        rand_bin_all = np.concatenate([per_region[r]["rand_bin"] for r in regions])
 
         jk_data_regions = assign_jackknife_regions(
             data_ra_all,
@@ -192,113 +361,198 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             nside=jk_cfg.get("nside"),
         )
 
-        jk_wedges = []
+        jk_vectors = []
         for idx in range(jk_cfg["n_regions"]):
             data_mask = jk_data_regions != idx
             rand_mask = jk_rand_regions != idx
-            jk_counts = compute_pair_counts(
+            counts_by_bin = compute_pair_counts_by_environment(
                 data_xyz_all[data_mask],
                 rand_xyz_all[rand_mask],
+                env_bin_all[data_mask],
+                rand_bin_all[rand_mask],
+                n_bins=n_bins,
                 s_edges=s_edges,
                 mu_edges=mu_edges,
                 data_weights=data_w_all[data_mask],
                 rand_weights=rand_w_all[rand_mask],
                 verbose=False,
+                pair_counter=compute_pair_counts,
             )
-            jk_xi = landy_szalay(jk_counts)
-            jk_wedge = wedge_xi(jk_xi, mu_edges, tangential_bounds)
-            jk_wedges.append(jk_wedge)
+            vecs = []
+            for b in range(n_bins):
+                xi_bin = landy_szalay(counts_by_bin[b])
+                vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
+            jk_vectors.append(np.concatenate(vecs))
 
-        jk_wedges = np.asarray(jk_wedges)
-        cov_result = covariance_from_jackknife(jk_wedges)
+        jk_vectors = np.asarray(jk_vectors)
+        cov_result = covariance_from_jackknife(jk_vectors)
+        cov_meta.update(cov_result.meta)
 
-    np.save(cov_dir / "xi_wedge_covariance.npy", cov_result.covariance)
+    cov_path = cov_dir / "xi_wedge_covariance.npy"
+    np.save(cov_path, cov_result.covariance)
+    with open(cov_dir / "metadata.json", "w", encoding="utf-8") as handle:
+        json.dump(cov_meta, handle, indent=2)
 
-    fit_cfg = prereg["bao_fitting"]
-    fit_range = (fit_cfg["fit_range"]["s_min"], fit_cfg["fit_range"]["s_max"])
-    nuisance_terms = fit_cfg["nuisance"]["terms"]
-    fit_result = fit_wedge(
-        s=s_centers,
-        xi=tangential,
-        covariance=cov_result.covariance,
-        fit_range=fit_range,
-        nuisance_terms=nuisance_terms,
-        template_params=template_params,
-    )
-
-    alpha_bins = np.full_like(env_means, fill_value=fit_result.alpha)
-    alpha_cov = np.eye(len(env_means)) * (fit_result.sigma_alpha**2)
-
-    hier_cfg = prereg["hierarchical_inference"]
-    bayes_cfg = hier_cfg["bayesian_option"]
-    if bayes_cfg["enabled"]:
-        beta_result = bayesian_beta(env_means, alpha_bins, alpha_cov, bayes_cfg["priors"]["beta_sigma"])
-    else:
-        beta_result = two_step_beta(env_means, alpha_bins, alpha_cov)
-
-    results = {
-        "alpha_bins": alpha_bins.tolist(),
-        "beta": beta_result.beta,
-        "sigma_beta": beta_result.sigma_beta,
+    template_params = {
+        "r_d": prereg["fiducial_cosmology"]["r_d"],
+        "sigma_nl": prereg["reconstruction"]["parameters"]["smoothing"],
+        "omega_m": prereg["fiducial_cosmology"]["omega_m"],
+        "omega_b": prereg["fiducial_cosmology"]["omega_b"],
+        "h": prereg["fiducial_cosmology"]["h"],
+        "n_s": prereg["fiducial_cosmology"]["n_s"],
     }
 
-    blinding_cfg = cfg.get("blinding", {})
+    alpha_records = []
+    alpha_values = []
+    alpha_sigmas = []
+    for b in range(n_bins):
+        idx_start = b * len(s_centers)
+        idx_end = (b + 1) * len(s_centers)
+        cov_block = cov_result.covariance[idx_start:idx_end, idx_start:idx_end]
+        fit_result = fit_wedge(
+            s=s_centers,
+            xi=xi_tangential[b],
+            covariance=cov_block,
+            fit_range=fit_range,
+            nuisance_terms=nuisance_terms,
+            template_params=template_params,
+            optimizer=fit_cfg["optimizer"],
+        )
+        alpha_values.append(fit_result.alpha)
+        alpha_sigmas.append(fit_result.sigma_alpha)
+        alpha_records.append(
+            {
+                "bin": b,
+                "alpha_perp_hat": fit_result.alpha,
+                "alpha_perp_sigma": fit_result.sigma_alpha,
+                "chi2": fit_result.chi2,
+                "dof": fit_result.meta.get("dof"),
+                "nuisance": {
+                    "bias_coeff": fit_result.meta.get("bias_coeff"),
+                    "coeffs": fit_result.meta.get("nuisance_coeffs"),
+                },
+                "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                "template_params": template_params,
+                "nuisance_terms": nuisance_terms,
+                "optimizer": fit_cfg["optimizer"],
+            }
+        )
+
+    alpha_by_bin_path = output_dir / "alpha_by_Ebin.json"
+    with open(alpha_by_bin_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "bins": alpha_records,
+                "bin_edges": env_bin_edges.tolist(),
+                "bin_centers": env_bin_centers.tolist(),
+                "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                "template": fit_cfg["template"],
+                "nuisance": fit_cfg["nuisance"],
+            },
+            handle,
+            indent=2,
+        )
+
+    alpha_values = np.asarray(alpha_values)
+    alpha_cov = np.diag(np.square(alpha_sigmas))
+
+    hier_cfg = prereg["hierarchical_inference"]
+    method = hier_cfg["primary_method"]
+    prior_sigma = None
+    if method == "bayesian":
+        prior_sigma = hier_cfg["bayesian_option"]["priors"]["beta_sigma"]
+
     blind_state = BlindState(
-        unblind=blinding_cfg.get("unblind", False),
+        unblind=cfg.get("blinding", {}).get("unblind", False),
         key_file=prereg["blinding"]["encryption"]["key_file"],
     )
 
-    save_metadata(output_dir / "metadata.json", {"seed": seed, "catalog": cfg["catalog"]})
-    np.savez(
-        output_dir / "pair_counts.npz",
-        dd=combined_counts.dd,
-        dr=combined_counts.dr,
-        rr=combined_counts.rr,
-    )
-    np.savez(output_dir / "xi_wedge.npz", s=s_centers, xi=tangential)
-
-    plot_wedge(s_centers, tangential, output_dir / "figures" / "xi_tangential.png", "Tangential wedge")
-
-    prereg_hash = compute_prereg_hash(Path(cfg["preregistration"]))
-    (output_dir / "prereg_hash.txt").write_text(prereg_hash, encoding="utf-8")
-    if blinding_cfg.get("enabled", True) and not blind_state.unblind:
+    if cfg.get("blinding", {}).get("enabled", True) and not blind_state.unblind:
         blind_state = initialize_blinding(blind_state, rng)
-        blinded = blind_results(
-            beta=beta_result.beta,
-            sigma_beta=beta_result.sigma_beta,
-            state=blind_state,
-            prereg_hash=prereg_hash,
+        blinded = infer_beta_blinded(
+            env_bin_centers,
+            alpha_values,
+            alpha_cov,
+            blind_state,
+            prereg_hash,
+            method=method,
+            prior_sigma=prior_sigma,
         )
         save_blinded_results(blinded, output_dir / "blinded_results.json")
     else:
-        write_results(output_dir / "results.json", results, blind_state)
+        raise RuntimeError("Unblinded runs are disabled in this pipeline version.")
+
+    save_metadata(output_dir / "metadata.json", {"seed": seed, "catalog": cfg["catalog"]})
 
     if prereg["reporting"]["generate_methods_snapshot"]:
-        write_methods_snapshot(cfg, output_dir / "methods_snapshot.yaml")
-
-    mock_betas = rng.normal(loc=0.0, scale=beta_result.sigma_beta, size=prereg["mocks"]["n_null_distribution"])
-    plot_beta_null(mock_betas, output_dir / "figures" / "beta_null.png", beta_obs=None)
+        resolved = {
+            "random_seed": seed,
+            "environment": {
+                "smoothing_radius": smoothing_radius,
+                "line_integral_step": line_step,
+                "pair_subsample_fraction": pair_subsample_fraction,
+                "normalization_method": normalization_method,
+                "max_outside_fraction": max_outside_fraction,
+            },
+            "correlation": {
+                "s_edges": s_edges.tolist(),
+                "mu_edges": mu_edges.tolist(),
+                "tangential_bounds": list(tangential_bounds),
+                "radial_bounds": list(radial_bounds),
+                "n_bins": n_bins,
+            },
+            "bao_fitting": {
+                "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                "nuisance_terms": nuisance_terms,
+                "optimizer": fit_cfg["optimizer"],
+                "template": fit_cfg["template"],
+            },
+            "density_field": {"grid_size": grid_size, "cell_size": cell_size},
+        }
+        write_methods_snapshot({"config": cfg, "resolved_parameters": resolved}, output_dir / "methods_snapshot.yaml")
 
     paper_package = output_dir / "paper_package"
     paper_package.mkdir(parents=True, exist_ok=True)
-    (paper_package / "figures").mkdir(parents=True, exist_ok=True)
+    (paper_package / "covariance").mkdir(parents=True, exist_ok=True)
+
     for src, dest in [
         (output_dir / "metadata.json", paper_package / "metadata.json"),
-        (output_dir / "xi_wedge.npz", paper_package / "xi_wedge.npz"),
-        (output_dir / "figures" / "xi_tangential.png", paper_package / "figures" / "xi_tangential.png"),
-        (cov_dir / "xi_wedge_covariance.npy", paper_package / "xi_wedge_covariance.npy"),
+        (e_by_galaxy_path, paper_package / "E_by_galaxy.npz"),
+        (output_dir / "environment_assignment_diagnostics.json", paper_package / "environment_assignment_diagnostics.json"),
+        (pair_counts_path, paper_package / "pair_counts_by_Ebin.npz"),
+        (xi_wedge_path, paper_package / "xi_wedge_by_Ebin.npz"),
+        (alpha_by_bin_path, paper_package / "alpha_by_Ebin.json"),
+        (cov_path, paper_package / "covariance" / "xi_wedge_covariance.npy"),
+        (cov_dir / "metadata.json", paper_package / "covariance" / "metadata.json"),
         (output_dir / "methods_snapshot.yaml", paper_package / "methods_snapshot.yaml"),
         (output_dir / "prereg_hash.txt", paper_package / "prereg_hash.txt"),
+        (output_dir / "blinded_results.json", paper_package / "blinded_results.json"),
     ]:
         if src.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(src.read_bytes())
-    if (output_dir / "blinded_results.json").exists():
-        (paper_package / "blinded_results.json").write_bytes((output_dir / "blinded_results.json").read_bytes())
-    if (output_dir / "results.json").exists():
-        (paper_package / "results.json").write_bytes((output_dir / "results.json").read_bytes())
 
+    stage_summary = {
+        "environment_assignment": "PASS" if np.any(valid_mask) else "FAIL",
+        "per_bin_xi": "PASS" if xi_tangential.shape[0] == n_bins else "FAIL",
+        "bao_fits": "PASS" if len(alpha_records) == n_bins else "FAIL",
+        "covariance": {"method": cov_meta.get("method"), "n": cov_meta.get("n_mocks") or cov_meta.get("n_jackknife")},
+        "inference": "PASS" if (output_dir / "blinded_results.json").exists() else "FAIL",
+    }
     with open(output_dir / "stage_summary.json", "w", encoding="utf-8") as handle:
-        json.dump({"stages": cfg["stages"]}, handle, indent=2)
+        json.dump(stage_summary, handle, indent=2)
+    (paper_package / "stage_summary.json").write_bytes((output_dir / "stage_summary.json").read_bytes())
+
+    try:
+        scan_forbidden_keys_in_dir(paper_package)
+    except ValueError as exc:
+        matches = [line for line in str(exc).splitlines() if ":" in line]
+        files = {line.split(":", 1)[0] for line in matches}
+        for path in files:
+            file_path = Path(path)
+            if file_path.exists():
+                file_path.unlink()
+        raise
 
 
 def main() -> None:

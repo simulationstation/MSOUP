@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+import json
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
@@ -18,6 +20,7 @@ class DensityField:
 def build_density_field(
     data_xyz: np.ndarray,
     random_xyz: np.ndarray,
+    data_weight: np.ndarray,
     random_weight: np.ndarray,
     grid_size: int,
     cell_size: float,
@@ -31,7 +34,7 @@ def build_density_field(
     maxs = np.max(np.vstack([data_xyz, random_xyz]), axis=0)
     edges = [np.linspace(origin[i], maxs[i] + cell_size, grid_size + 1) for i in range(3)]
 
-    data_hist, _ = np.histogramdd(data_xyz, bins=edges)
+    data_hist, _ = np.histogramdd(data_xyz, bins=edges, weights=data_weight)
     rand_hist, _ = np.histogramdd(random_xyz, bins=edges, weights=random_weight)
 
     alpha = data_hist.sum() / np.maximum(rand_hist.sum(), 1.0)
@@ -78,13 +81,42 @@ def trilinear_sample(field: DensityField, points: np.ndarray) -> np.ndarray:
     return c0 * (1 - fz) + c1 * fz
 
 
-def line_integral(field: DensityField, p0: np.ndarray, p1: np.ndarray, step: float) -> float:
-    vec = p1 - p0
-    length = np.linalg.norm(vec)
-    if length == 0.0:
-        return 0.0
-    n_steps = max(int(np.ceil(length / step)), 1)
-    ts = np.linspace(0, 1, n_steps)
-    points = p0[None, :] + ts[:, None] * vec[None, :]
+def sample_with_mask(field: DensityField, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Sample grid values and return mask of points inside the grid."""
+    rel = (points - field.origin) / field.cell_size
+    idx0 = np.floor(rel).astype(int)
+    shape = np.array(field.grid.shape)
+    inside = np.all((idx0 >= 0) & (idx0 < (shape - 1)), axis=1)
     values = trilinear_sample(field, points)
-    return np.trapz(values, ts) / 1.0
+    return values, inside
+
+
+def line_integral(field: DensityField, p0: np.ndarray, p1: np.ndarray, step: float) -> Tuple[float, float]:
+    """Line integral of the density field between points.
+
+    Returns (integral, outside_fraction) where outside_fraction is the
+    fraction of sample points falling outside the grid.
+    """
+    vec = p1 - p0
+    length = float(np.linalg.norm(vec))
+    if length == 0.0:
+        return 0.0, 1.0
+    n_steps = max(int(np.ceil(length / step)) + 1, 2)
+    s_vals = np.linspace(0.0, length, n_steps)
+    points = p0[None, :] + (s_vals / length)[:, None] * vec[None, :]
+    values, inside = sample_with_mask(field, points)
+    values = np.where(inside, values, 0.0)
+    integral = float(np.trapz(values, s_vals))
+    outside_fraction = 1.0 - float(np.mean(inside))
+    return integral, outside_fraction
+
+
+def save_density_field(path: Path, field: DensityField, meta: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        grid=field.grid,
+        origin=field.origin,
+        cell_size=np.array([field.cell_size], dtype="f4"),
+        meta=np.array([json.dumps(meta)], dtype=object),
+    )
