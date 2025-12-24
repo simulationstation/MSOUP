@@ -10,7 +10,7 @@ import numpy as np
 
 from bao_overlap.blinding import BlindState
 from bao_overlap.correlation import compute_pair_counts, landy_szalay, parse_wedge_bounds, wedge_xi
-from bao_overlap.density_field import build_density_field, gaussian_smooth
+from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.io import load_run_config, load_catalog
 from bao_overlap.overlap_metric import compute_environment
@@ -49,7 +49,17 @@ def main() -> None:
         return
 
     if args.stage == "overlap_metric":
-        density = build_density_field(data_xyz, rand_xyz, data_cat.w, rand_cat.w, grid_size=64, cell_size=5.0)
+        env_primary = prereg["environment_metric"]["primary"]
+        env_params = env_primary["parameters"]
+        target_cell_size = float(env_params.get("target_cell_size", 10.0))
+        padding = float(env_params.get("padding", max(3.0 * env_params["smoothing_radius"], 50.0)))
+        grid_spec = build_grid_spec(
+            data_xyz=data_xyz,
+            random_xyz=rand_xyz,
+            target_cell_size=target_cell_size,
+            padding=padding,
+        )
+        density = build_density_field(data_xyz, rand_xyz, data_cat.w, rand_cat.w, grid_spec=grid_spec)
         env_primary = prereg["environment_metric"]["primary"]
         smooth = gaussian_smooth(density, radius=env_primary["parameters"]["smoothing_radius"])
         rng = np.random.default_rng(seed)
