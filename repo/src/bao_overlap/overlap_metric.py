@@ -59,15 +59,16 @@ def compute_e2(field: DensityField, pairs: np.ndarray, delta_threshold: float, m
 
     super_mask = np.isin(labeled, valid_labels)
     e_values = np.zeros(pairs.shape[0], dtype="f4")
+    min_cell = float(np.min(field.cell_sizes))
     for idx, (p0, p1) in enumerate(pairs):
         length = np.linalg.norm(p1 - p0)
         if length == 0.0:
             e_values[idx] = 0.0
             continue
-        n_steps = max(int(np.ceil(length / field.cell_size)), 1)
+        n_steps = max(int(np.ceil(length / min_cell)), 1)
         ts = np.linspace(0, 1, n_steps)
         points = p0[None, :] + ts[:, None] * (p1 - p0)[None, :]
-        rel = (points - field.origin) / field.cell_size
+        rel = (points - field.origin) / field.cell_sizes
         idxs = np.floor(rel).astype(int)
         idxs = np.clip(idxs, [0, 0, 0], np.array(field.grid.shape) - 1)
         inside = super_mask[idxs[:, 0], idxs[:, 1], idxs[:, 2]]

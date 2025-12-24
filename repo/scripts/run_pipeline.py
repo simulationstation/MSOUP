@@ -20,7 +20,7 @@ from bao_overlap.correlation import (
     wedge_xi,
 )
 from bao_overlap.covariance import assign_jackknife_regions, covariance_from_jackknife, covariance_from_mocks
-from bao_overlap.density_field import build_density_field, gaussian_smooth, save_density_field, trilinear_sample
+from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth, save_density_field, trilinear_sample
 from bao_overlap.fitting import fit_wedge
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.hierarchical import infer_beta_blinded
@@ -77,8 +77,10 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     quantile_edges = np.asarray(prereg["environment_binning"]["quantile_edges"], dtype="f8")
 
     max_outside_fraction = 0.2
-    grid_size = 64
-    cell_size = 5.0
+    grid_cfg = env_primary.get("grid", {})
+    target_cell_size = float(env_params.get("target_cell_size", grid_cfg.get("target_cell_size", 10.0)))
+    padding = float(env_params.get("padding", grid_cfg.get("padding", max(3.0 * smoothing_radius, 50.0))))
+    max_n_per_axis = int(env_params.get("max_n_per_axis", grid_cfg.get("max_n_per_axis", 512)))
 
     per_region = {}
     all_env_raw = []
@@ -103,13 +105,19 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
         rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
 
+        grid_spec = build_grid_spec(
+            data_xyz=data_xyz,
+            random_xyz=rand_xyz,
+            target_cell_size=target_cell_size,
+            padding=padding,
+            max_n_per_axis=max_n_per_axis,
+        )
         density = build_density_field(
             data_xyz,
             rand_xyz,
             data_cat.w,
             rand_cat.w,
-            grid_size=grid_size,
-            cell_size=cell_size,
+            grid_spec=grid_spec,
         )
         smooth = gaussian_smooth(density, radius=smoothing_radius)
         save_density_field(
@@ -117,8 +125,10 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             smooth,
             meta={
                 "region": region,
-                "grid_size": grid_size,
-                "cell_size": cell_size,
+                "grid_shape": grid_spec.grid_shape,
+                "cell_sizes": grid_spec.cell_sizes.tolist(),
+                "padding": padding,
+                "target_cell_size": target_cell_size,
                 "smoothing_radius": smoothing_radius,
                 "line_integral_step": line_step,
             },
@@ -507,7 +517,11 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 "optimizer": fit_cfg["optimizer"],
                 "template": fit_cfg["template"],
             },
-            "density_field": {"grid_size": grid_size, "cell_size": cell_size},
+            "density_field": {
+                "target_cell_size": target_cell_size,
+                "padding": padding,
+                "max_n_per_axis": max_n_per_axis,
+            },
         }
         write_methods_snapshot({"config": cfg, "resolved_parameters": resolved}, output_dir / "methods_snapshot.yaml")
 

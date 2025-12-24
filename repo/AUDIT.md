@@ -1,166 +1,84 @@
-# BAO Environment-Overlap Pipeline Audit (Blinded)
-
-**Audit Date:** 2025-12-23
-**Commit Hash:** `795e7d7d0dad436e5bf899f626350158b27d8b28`
-**Run Directory:** `today_results/run_20251223_144502`
-**Status:** **PASS (7/7 self-audit checks)**
-
----
+# Density Grid Sizing Bug Audit
 
 ## Executive Summary
+The density grid was built with a fixed grid size and scalar cell size that did not reflect the actual catalog extents. This created grids that were far too small, producing out-of-range indices during trilinear sampling and invalidating E1 line integrals. The fix introduces a `GridSpec` with per-axis cell sizes derived from the catalog extent plus padding, updates trilinear sampling and smoothing to use per-axis spacing, and removes hard-coded grid sizing from pipeline scripts.
 
-**Overall status:** **PASS** — The pipeline successfully executed in blinded mode, producing all required auditable artifacts. Self-audit confirms no blinding leaks, valid preregistration schema, and proper covariance computation.
+## Before Evidence (from latest failing run)
+- Data XYZ span was approximately **[1998, 3869, 2071] h^-1 Mpc**.
+- Grid shape **(64, 64, 64)** with **cell_size = 5.0** implied coverage of **320 h^-1 Mpc per axis**, far smaller than the data extent.
+- `density_field.py` built edges implying ~66 h^-1 Mpc bins but stored `cell_size=5.0`; `trilinear_sample` used 5.0 and computed absurd indices (e.g., 459).
+- Result: **All E1 integrals invalid** due to sampling outside the grid (0/100 valid in diagnostics).
 
-**Key results:**
-- Blinded β = -0.197 (true value encrypted)
-- Prereg hash verified: `c3ccc533eeef4a03f1ea87fd7ca73945ba23a188f3a79cb8791c3912194ddc9c`
-- No forbidden keys found in outputs
-- TreeCorr backend used for pair counting
+## After Evidence (Grid Diagnostic Output)
+- The diagnostic script ran but **could not load catalogs in this environment**, so it appended a Grid Diagnostic section with a `FileNotFoundError`. Because the data files are missing, the script could not report valid E1 fractions. This is documented in the Grid Diagnostic section below.
 
----
+## Code Locations Updated
+- `repo/src/bao_overlap/density_field.py`
+  - Added `GridSpec` dataclass and `build_grid_spec`.
+  - Updated `build_density_field` to accept `GridSpec`.
+  - Updated `gaussian_smooth`, `trilinear_sample`, and `sample_with_mask` to use per-axis `cell_sizes` and correct origin.
+- `repo/src/bao_overlap/overlap_metric.py`
+  - Updated `compute_e2` sampling and step sizing to use per-axis `cell_sizes`.
+- `repo/scripts/run_pipeline.py`
+  - Removed hard-coded `grid_size=64` and `cell_size=5.0`.
+  - Compute grid parameters from catalog extents + padding.
+- `repo/scripts/run_stage.py`
+  - Uses `build_grid_spec` and new grid parameters.
+- `repo/scripts/grid_diagnostic.py`
+  - New diagnostic script that appends a “Grid Diagnostic” section to `AUDIT.md`.
+- Tests:
+  - `repo/tests/test_grid_covers_span.py`
+  - `repo/tests/test_trilinear_sample_consistency.py`
+  - `repo/tests/test_e1_not_all_invalid_toy.py`
 
-## Self-Audit Results
+## How to Reproduce (Blinded)
+- `PYTHONPATH=src python scripts/grid_diagnostic.py --config configs/runs/eboss_lrgpcmass_default.yaml`
+- `PYTHONPATH=src python scripts/run_pipeline.py --config configs/runs/eboss_lrgpcmass_default.yaml --dry-run`
 
-| Check | Status | Evidence |
-|-------|--------|----------|
-| prereg_schema | **PASS** | Preregistration schema loaded with top-level keys |
-| prereg_analysis_usage | **PASS** | No prereg['analysis'] access found |
-| backend_imports | **PASS** | Backend import available: treecorr |
-| wedge_bounds | **PASS** | Wedge bounds are numeric and applied via parse_wedge_bounds |
-| covariance | **PASS** | Covariance saved and non-identity at covariance/xi_wedge_covariance.npy |
-| paper_package | **PASS** | Paper package directory exists with required artifacts |
-| blinding_leaks | **PASS** | No forbidden keys found in blinded outputs |
+## Test Results Summary
+- `PYTHONPATH=repo/src pytest repo/tests/test_grid_covers_span.py repo/tests/test_trilinear_sample_consistency.py repo/tests/test_e1_not_all_invalid_toy.py` **PASS**
 
-**Summary: PASS 7 / FAIL 0**
+## Exact Commands Run
+1. `ls`
+2. `find .. -name AGENTS.md -print`
+3. `sed -n '1,220p' repo/src/bao_overlap/density_field.py`
+4. `sed -n '1,200p' repo/scripts/run_pipeline.py`
+5. `sed -n '200,400p' repo/scripts/run_pipeline.py`
+6. `rg -n "trilinear" -n repo/src/bao_overlap`
+7. `sed -n '1,200p' repo/src/bao_overlap/overlap_metric.py`
+8. `sed -n '200,320p' repo/src/bao_overlap/overlap_metric.py`
+9. `rg -n "cell_size|grid" repo/configs repo/src -g"*.yaml"` (exit code 1; no matches)
+10. `rg -n "cell_size|grid" repo/configs` (exit code 1; no matches)
+11. `ls repo/configs/runs`
+12. `sed -n '1,200p' repo/configs/runs/eboss_lrgpcmass_default.yaml`
+13. `rg -n "cell|grid|padding|density" configs/preregistration.yaml` (exit code 2; file not found in cwd)
+14. `ls /workspace/MSOUP/configs`
+15. `ls /workspace/MSOUP/repo/configs`
+16. `rg -n "cell|grid|padding|density" /workspace/MSOUP/repo/configs/preregistration.yaml`
+17. `sed -n '1,200p' /workspace/MSOUP/repo/configs/preregistration.yaml`
+18. `rg -n "build_density_field" -n`
+19. `sed -n '1,120p' repo/scripts/run_stage.py`
+20. `rg -n "cell_size" repo/src/bao_overlap`
+21. `sed -n '480,560p' repo/scripts/run_pipeline.py`
+22. `rg -n "grid_size|cell_size" repo/scripts/run_pipeline.py`
+23. `rg -n "cell_size" repo/src repo/scripts`
+24. `cat <<'EOF' > /workspace/MSOUP/repo/scripts/grid_diagnostic.py ... EOF`
+25. `cat <<'EOF' > /workspace/MSOUP/repo/tests/test_grid_covers_span.py ... EOF`
+26. `cat <<'EOF' > /workspace/MSOUP/repo/tests/test_trilinear_sample_consistency.py ... EOF`
+27. `cat <<'EOF' > /workspace/MSOUP/repo/tests/test_e1_not_all_invalid_toy.py ... EOF`
+28. `sed -n '70,170p' /workspace/MSOUP/repo/scripts/grid_diagnostic.py`
+29. `python repo/scripts/grid_diagnostic.py --config repo/configs/runs/eboss_lrgpcmass_default.yaml` (failed: ModuleNotFoundError: bao_overlap)
+30. `PYTHONPATH=repo/src python repo/scripts/grid_diagnostic.py --config repo/configs/runs/eboss_lrgpcmass_default.yaml` (failed: FileNotFoundError: configs/preregistration.yaml due to cwd)
+31. `PYTHONPATH=src python scripts/grid_diagnostic.py --config configs/runs/eboss_lrgpcmass_default.yaml` (appended Grid Diagnostic; data files missing)
+32. `PYTHONPATH=repo/src pytest repo/tests/test_grid_covers_span.py repo/tests/test_trilinear_sample_consistency.py repo/tests/test_e1_not_all_invalid_toy.py`
+33. `cat <<'EOF' > /workspace/MSOUP/repo/AUDIT.md ... EOF`
+34. `PYTHONPATH=src python scripts/grid_diagnostic.py --config configs/runs/eboss_lrgpcmass_default.yaml` (appended Grid Diagnostic; data files missing)
+35. `tail -n 20 /workspace/MSOUP/repo/AUDIT.md`
 
----
+## Grid Diagnostic
+Timestamp: 2025-12-24T02:06:25.064751Z
+Config: configs/runs/eboss_lrgpcmass_default.yaml
+Grid params: target_cell_size=10.0, padding=50.0, max_n_per_axis=512
 
-## Compliance Matrix
-
-| Requirement | Status | Evidence |
-|-------------|--------|----------|
-| Prereg schema uses top-level keys | **PASS** | `src/bao_overlap/prereg.py` |
-| Blinding enforced (no beta/sigma_beta leaks) | **PASS** | `blinded_results.json` contains only encrypted values |
-| Wedge bounds numeric and applied | **PASS** | `parse_wedge_bounds()` in correlation.py |
-| Weighted Landy-Szalay normalization | **PASS** | Updated `landy_szalay()` |
-| Regions NGC/SGC combined per prereg | **PASS** | Loop in `scripts/run_pipeline.py` |
-| Covariance not placeholder | **PASS** | Jackknife covariance saved (5.5 KB matrix) |
-| BAO template is standard & prereg-linked | **PASS** | EH98-inspired template + prereg nuisance terms |
-| Paper package output present | **PASS** | `paper_package/` contains all required artifacts |
-| No forbidden keys in outputs | **PASS** | Grep scan confirms no leaks |
-
----
-
-## Paper Package Contents
-
-```
-paper_package/
-├── blinded_results.json    (785 B)
-├── figures/
-│   └── xi_tangential.png   (57 KB)
-├── metadata.json           (51 B)
-├── methods_snapshot.yaml   (16 KB)
-├── prereg_hash.txt         (64 B)
-├── xi_wedge.npz            (908 B)
-└── xi_wedge_covariance.npy (5.5 KB)
-```
-
----
-
-## Blinding Verification
-
-**Blinded results file (`blinded_results.json`):**
-```json
-{
-  "beta_blinded": -0.19678768912880135,
-  "beta_encrypted": "gAAAAABpSzup...",
-  "sigma_beta_encrypted": "gAAAAABpSzup...",
-  "significance_encrypted": "gAAAAABpSzup...",
-  "kappa_encrypted": "gAAAAABpSzup...",
-  "prereg_hash": "c3ccc533eeef4a03f1ea87fd7ca73945ba23a188f3a79cb8791c3912194ddc9c",
-  "timestamp": "2025-12-24T01:02:33.480336",
-  "is_blinded": true
-}
-```
-
-**Forbidden key scan:**
-- `beta` (unblinded): NOT FOUND
-- `sigma_beta` (unblinded): NOT FOUND
-- `p_value`: NOT FOUND
-- `zscore`: NOT FOUND
-- `percentile` (observed): NOT FOUND
-
-Note: References to `sigma_beta` in `methods_snapshot.yaml` are preregistration specifications (decision criteria), not actual observed values.
-
----
-
-## Environment
-
-| Component | Value |
-|-----------|-------|
-| Python | 3.12.3 |
-| pip | 25.3 |
-| TreeCorr | 5.1.2 |
-| Corrfunc | Not installed |
-| NumPy | 2.3.5 |
-| Astropy | 7.2.0 |
-
-**Backend used:** TreeCorr (compute_pair_counts_simple)
-
----
-
-## Preregistration
-
-| Field | Value |
-|-------|-------|
-| Hash | `c3ccc533eeef4a03f1ea87fd7ca73945ba23a188f3a79cb8791c3912194ddc9c` |
-| Lock date | 2025-12-23 |
-| Wedge | tangential, mu in [0.0, 0.2] |
-| Separation | s in [50, 180] h^-1 Mpc, ds = 5 |
-| Environment metric | E1 line-integrated overdensity |
-| Normalization | median/MAD |
-| Regions | NGC, SGC |
-
----
-
-## Covariance
-
-- **Method:** Jackknife (100 regions, healpix nside=4)
-- **Output:** `xi_wedge_covariance.npy` (26x26 matrix)
-- **Verification:** Matrix is non-identity, positive semi-definite
-
----
-
-## Run Configuration
-
-- **Dataset:** eBOSS DR16 LRGpCMASS
-- **Sample:** 5% dry-run (12,682 NGC + 5,944 SGC = 18,626 galaxies)
-- **Randoms:** 659,919 NGC + 303,662 SGC = 963,581 randoms
-- **Blinding:** Enabled (unblind=false)
-
----
-
-## Remaining Steps Before Unblinding
-
-1. **Robustness checks:** Run preregistered variants (smoothing R={10,15,20}, wedge bounds, s-range)
-2. **Mock calibration:** Process EZmocks for null distribution
-3. **Reconstruction comparison:** Compare pre/post-recon results
-4. **Full data run:** Execute with 100% sample (not 5% dry-run)
-
----
-
-## Attestation
-
-This audit confirms:
-- No unblinding was performed
-- No preregistration settings were modified
-- All required artifacts are present
-- No forbidden keys leak true beta or significance
-
-**SAFE TO PROCEED TO ROBUSTNESS/MOCKS/RECON: YES**
-
-Justification: All 7 self-audit checks pass. Paper package contains required artifacts. Blinding is properly enforced with encrypted values. The 5% dry-run demonstrates pipeline correctness; full data run can proceed.
-
----
-
-**End of Audit Report**
+Grid diagnostic failed with exception:
+FileNotFoundError: [Errno 2] No such file or directory: '../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits'
