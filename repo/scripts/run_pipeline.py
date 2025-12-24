@@ -19,7 +19,7 @@ from bao_overlap.blinding import (
 from bao_overlap.correlation import (
     bin_by_environment,
     combine_pair_counts,
-    compute_pair_counts,
+    compute_pair_counts_simple as compute_pair_counts,
     landy_szalay,
     parse_wedge_bounds,
     wedge_xi,
@@ -79,8 +79,9 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             dry_run_fraction=dry_run_fraction,
             seed=seed,
         )
-        data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **cosmo_cfg)
-        rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **cosmo_cfg)
+        geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
+        data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
+        rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
 
         density = build_density_field(data_xyz, rand_xyz, rand_cat.w, grid_size=64, cell_size=5.0)
         smooth = gaussian_smooth(density, radius=smoothing_radius)

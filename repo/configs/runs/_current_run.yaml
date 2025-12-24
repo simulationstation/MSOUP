@@ -1,0 +1,67 @@
+# ==============================================================================
+# Run Configuration: eBOSS DR16 LRGpCMASS Primary Analysis
+# ==============================================================================
+# This is the primary analysis configuration for the preregistered BAO
+# environment-overlap study using eBOSS DR16 LRGpCMASS.
+# ==============================================================================
+
+name: "eboss_lrgpcmass_primary"
+catalog: "eboss_lrgpcmass"
+output_dir: "../today_results/run_20251223_144502"
+
+# Reference to preregistration and datasets
+preregistration: "configs/preregistration.yaml"
+datasets: "configs/datasets.yaml"
+
+# Blinding configuration
+blinding:
+  enabled: true
+  unblind: false  # Set to true ONLY for final unblinding after robustness
+
+# Analysis stages
+stages:
+  - io_qa
+  - density
+  - correlation
+  - bao_fit
+  - inference
+  - mocks
+  - robustness
+  - report
+
+# Runtime configuration
+runtime:
+  n_workers: 8
+  dry_run_fraction: 0.05
+  verbose: true
+  checkpoint_interval: 10
+
+# Regions to analyze
+regions:
+  - NGC
+  - SGC
+  - combined
+
+# Reconstruction settings
+reconstruction:
+  analyze_pre_recon: true
+  analyze_post_recon: true
+
+# Mock settings
+mocks:
+  n_covariance: 200
+  n_null_distribution: 1000
+  parallel: true
+
+# QA thresholds
+qa:
+  min_galaxies: 10000
+  max_weight: 100.0
+  max_nan_fraction: 0.001
+  z_tolerance: 0.01
+
+# Output settings
+output:
+  save_intermediates: true
+  figure_formats: ["pdf", "png"]
+  compress_data: true
