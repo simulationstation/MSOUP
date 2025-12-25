@@ -35,6 +35,14 @@ def _sigma_r(k: np.ndarray, pk: np.ndarray, radius: float) -> float:
     return float(np.sqrt(max(sigma2, 0.0)))
 
 
+def _xi_from_pk(k: np.ndarray, pk: np.ndarray, s: np.ndarray) -> np.ndarray:
+    ks = np.outer(k, s)
+    j0 = np.sinc(ks / np.pi)
+    integrand = k[:, None] ** 2 * pk[:, None] * j0
+    xi = np.trapz(integrand, k, axis=0) / (2.0 * np.pi**2)
+    return xi
+
+
 def bao_template(
     s: np.ndarray,
     r_d: float,
@@ -61,11 +69,7 @@ def bao_template(
     else:
         pk = pk_shape
 
-    ks = np.outer(k, s)
-    j0 = np.sinc(ks / np.pi)
-    integrand = k[:, None] ** 2 * pk[:, None] * j0
-    xi = np.trapz(integrand, k, axis=0) / (2.0 * np.pi**2)
-    return xi
+    return _xi_from_pk(k, pk, s)
 
 
 def bao_template_damped(
@@ -101,11 +105,48 @@ def bao_template_damped(
     damping = np.exp(-0.5 * (k * sigma_nl) ** 2)
     pk = p_nowiggle + p_wiggle * damping
 
-    ks = np.outer(k, s)
-    j0 = np.sinc(ks / np.pi)
-    integrand = k[:, None] ** 2 * pk[:, None] * j0
-    xi = np.trapz(integrand, k, axis=0) / (2.0 * np.pi**2)
-    return xi
+    return _xi_from_pk(k, pk, s)
+
+
+def bao_wiggle_components(
+    s: np.ndarray,
+    r_d: float,
+    omega_m: float,
+    omega_b: float,
+    h: float,
+    n_s: float,
+    sigma8: float,
+    sigma_nl: float | None = None,
+    k_min: float = 1.0e-3,
+    k_max: float = 10.0,
+    n_k: int = 1024,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (xi_lin, xi_nowiggle, xi_wiggle) on a shared s grid."""
+    k = np.logspace(np.log10(k_min), np.log10(k_max), n_k)
+    t0 = _transfer_no_wiggle(k, omega_m=omega_m, h=h)
+    f_b = omega_b / omega_m
+    r_d_h = r_d * h
+
+    p_nowiggle = k**n_s * (t0**2)
+    wiggle = 1.0 + f_b * np.sin(k * r_d_h) / np.maximum(k * r_d_h, 1.0e-8)
+    p_lin = p_nowiggle * wiggle
+    p_wiggle = p_lin - p_nowiggle
+
+    sigma8_unscaled = _sigma_r(k, p_lin, radius=8.0)
+    if sigma8_unscaled > 0:
+        scale = (sigma8 / sigma8_unscaled) ** 2
+        p_lin = p_lin * scale
+        p_nowiggle = p_nowiggle * scale
+        p_wiggle = p_wiggle * scale
+
+    if sigma_nl is not None:
+        damping = np.exp(-(k * sigma_nl) ** 2)
+        p_wiggle = p_wiggle * damping
+
+    xi_lin = _xi_from_pk(k, p_lin, s)
+    xi_nowiggle = _xi_from_pk(k, p_nowiggle, s)
+    xi_wiggle = _xi_from_pk(k, p_wiggle, s)
+    return xi_lin, xi_nowiggle, xi_wiggle
 
 
 def model_xi(

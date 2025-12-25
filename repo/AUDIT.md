@@ -198,6 +198,31 @@ This change is made **before inspecting any blinded results** from the full prod
 - `repo/src/bao_overlap/fitting.py`: Default `alpha_bounds` changed from `(0.8, 1.2)` to `(0.6, 1.4)`
 - `repo/scripts/run_pipeline.py`: Explicit `alpha_bounds` parameter added to `fit_wedge()` call
 
+## Wiggle-Only Monopole Diagnostic Fit (2025-12-24)
+
+### Problem
+In validation runs, the standard BAO monopole fit can collapse to the α bounds, indicating that
+the broadband term and bias are too free to anchor the wiggle scale. This creates non-physical
+boundary solutions and hides whether the oscillatory component is actually constraining α.
+
+### Decision Rationale
+We add a **diagnostic-only** “wiggle-only” mode (no unblinding, no preregistration changes) that:
+- Separates the linear and no-wiggle templates to isolate the oscillatory component.
+- Fits only the wiggle component with a low-order POLY2 broadband so the oscillations anchor α.
+- Profiles α on a fixed grid, with optional σ_nl profiling bounded for diagnostics.
+- Raises a hard error if **all** bins hit the α boundary, preventing silent boundary collapse.
+
+### Change Applied
+**Files modified:**
+- `repo/src/bao_overlap/bao_template.py`: Added `bao_wiggle_components` to generate xi_lin, xi_nowiggle, and xi_wiggle on a shared s grid.
+- `repo/src/bao_overlap/diagnostic_bao.py`: Added `fit_wiggle_only_monopole` diagnostic fit and `FitFailure` gate.
+- `repo/scripts/run_pipeline.py`: Optional `diagnostic_wiggle_only` mode and boundary-collapse gate.
+- `repo/tests/test_wiggle_only_fit.py`: Injection/recovery unit test for α≈1 without boundary hits.
+
+### Notes
+This mode is disabled by default and only runs when explicitly enabled in the run config under
+`diagnostic_wiggle_only`. It produces `alpha_by_Ebin_wiggle_only.json` alongside existing outputs.
+
 ## Diagnostic BAO Nonlinear Damping Extension (2025-12-24)
 
 ### Why Σ_nl is needed
