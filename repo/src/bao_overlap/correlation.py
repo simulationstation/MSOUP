@@ -353,6 +353,7 @@ def compute_pair_counts_by_environment(
             data_weights=None if data_weights is None else data_weights[data_mask],
             rand_weights=rand_weights,  # ALL random weights
             verbose=verbose,
+            skip_rr=(precomputed_rr is not None),  # Skip RR if we have precomputed
         )
 
         # Replace RR with the shared RR from all randoms
@@ -432,12 +433,16 @@ def compute_pair_counts_simple(
     data_weights: Optional[np.ndarray] = None,
     rand_weights: Optional[np.ndarray] = None,
     verbose: bool = True,
+    skip_rr: bool = False,
 ) -> PairCounts:
     """
     Simplified pair counting using 1D TreeCorr and uniform mu distribution.
 
     This is faster and suitable for initial analysis. For full 2D ξ(s,μ),
     use compute_pair_counts().
+
+    If skip_rr=True, RR computation is skipped (returns zeros) for efficiency
+    when a precomputed RR will be substituted later.
     """
     _check_memory()
 
@@ -490,15 +495,19 @@ def compute_pair_counts_simple(
     dr = treecorr.NNCorrelation(**config)
     dr.process(data_cat, rand_cat)
 
-    if verbose:
-        print("  RR...")
-    rr = treecorr.NNCorrelation(**config)
-    rr.process(rand_cat)
-
     # Create 2D arrays assuming uniform mu distribution
     dd_2d = np.tile(dd.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
     dr_2d = np.tile(dr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
-    rr_2d = np.tile(rr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+
+    if skip_rr:
+        # Return zeros - caller will substitute precomputed RR
+        rr_2d = np.zeros_like(dd_2d)
+    else:
+        if verbose:
+            print("  RR...")
+        rr = treecorr.NNCorrelation(**config)
+        rr.process(rand_cat)
+        rr_2d = np.tile(rr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
 
     return PairCounts(
         s_edges=s_edges,

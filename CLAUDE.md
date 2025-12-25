@@ -9,3 +9,5 @@
 3. **When restarting pipelines** - Use environment variables or edit config, do NOT delete output files. Pipelines may have checkpoint/resume capability.
 
 4. **Check Python indentation before editing** - Always check the existing indentation style (spaces vs tabs, indent width) in a Python file BEFORE making edits. Do not assume any paradigm.
+
+5. **No vague time predictions** - Do not say "should finish soon", "wait X minutes", or make vague guesses. Time estimates based on actual evidence (e.g., "batch 1 took 30 min, 9 remaining = ~270 min") are fine.

@@ -733,10 +733,10 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         if jk_checkpoint_path.exists():
             status("  Resuming JK from checkpoint...", output_dir)
             jk_ckpt = np.load(jk_checkpoint_path)
-            start_idx = int(jk_ckpt["completed_iterations"])
+            start_idx = int(jk_ckpt["completed_iterations"].item())
             jk_accum.sum_x = jk_ckpt["sum_x"].copy()
             jk_accum.sum_xx = jk_ckpt["sum_xx"].copy()
-            jk_accum.n = int(jk_ckpt["n"])
+            jk_accum.n = int(jk_ckpt["n"].item())
             status(f"  Resumed from iteration {start_idx}/{n_jk}", output_dir)
 
         # Process in batches for checkpointing (batch_size iterations, then save)
