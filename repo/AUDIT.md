@@ -198,6 +198,14 @@ This change is made **before inspecting any blinded results** from the full prod
 - `repo/src/bao_overlap/fitting.py`: Default `alpha_bounds` changed from `(0.8, 1.2)` to `(0.6, 1.4)`
 - `repo/scripts/run_pipeline.py`: Explicit `alpha_bounds` parameter added to `fit_wedge()` call
 
+## Diagnostic BAO Nonlinear Damping Extension (2025-12-24)
+
+### Why Σ_nl is needed
+Environment-dependent reconstruction and selection effects can alter the effective BAO damping scale. Allowing Σ_nl to float in a diagnostic fit helps absorb unmodeled nonlinear damping and avoids instability when a fixed smoothing scale mis-specifies the wiggle amplitude.
+
+### Diagnostic-only scope
+This Σ_nl flexibility is implemented as a **diagnostic extension** and is only executed when explicitly enabled in the run configuration (`diagnostic_bao.enabled: true`). The preregistered primary model and endpoints remain unchanged; the diagnostic outputs are written to a separate file to avoid overwriting primary results. The intent is to reduce chi² explosions in per-bin fits without altering the preregistered analysis.
+
 **Audit trail:**
 - Change committed before 100% production run starts
 - `alpha_bounds` now recorded in `alpha_by_Ebin.json` output for each fit
