@@ -45,3 +45,14 @@ python scripts/run_pipeline.py --config configs/runs/eboss_lrgpcmass_default.yam
 ## Notes
 - Correlation backend defaults to a lightweight numpy implementation, but can be configured to use pycorr/Corrfunc when available.
 - This repository is a scaffold with conservative defaults and explicit checkpoints for scientific reproducibility.
+
+## MSoup/Mverse Neutrality Research Suite
+This repo also includes a self-contained research codebase under `src/msoup` for testing the MSoup/Mverse neutrality target with XOR-SAT constraints.
+
+### Quickstart
+```bash
+pip install -e .
+python scripts/run_all.py
+```
+
+The run writes `outputs/REPORT.md`, `outputs/REPORT.json`, and optional figures to `outputs/figures/`.
