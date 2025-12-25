@@ -740,7 +740,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             status(f"  Resumed from iteration {start_idx}/{n_jk}", output_dir)
 
         # Process in batches for checkpointing (batch_size iterations, then save)
-        jk_batch_size = 50  # Save checkpoint every 50 iterations
+        # SMOKE TEST: Set to 5 for quick validation, then restore to 50 for full run
+        jk_batch_size = int(os.environ.get("BAO_JK_BATCH", "50"))
 
         for batch_start in range(start_idx, n_jk, jk_batch_size):
             batch_end = min(batch_start + jk_batch_size, n_jk)

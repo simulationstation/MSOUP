@@ -1,0 +1,24 @@
+[06:26:40] STAGE 0: Pipeline initialization
+[06:26:40] STAGE 1: RESUMING from existing E_by_galaxy.npz
+[06:26:40]   Loading catalog for NGC (resume mode)...
+Loading eboss_lrgpcmass NGC 
+  Data: ../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-NGC-vDR16.fits
+  Randoms: ../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-NGC-vDR16.fits
+  Loaded 255,741 data, 13,180,418 randoms
+[06:26:43]   NGC: 255741 data, 13180418 randoms
+[06:26:52]   Loading catalog for SGC (resume mode)...
+Loading eboss_lrgpcmass SGC 
+  Data: ../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_data-SGC-vDR16.fits
+  Randoms: ../data/eboss/dr16/LRGpCMASS/v1/eBOSS_LRGpCMASS_clustering_random-SGC-vDR16.fits
+  Loaded 121,717 data, 6,065,434 randoms
+[06:26:54]   SGC: 121717 data, 6065434 randoms
+[06:26:58]   Resume complete - skipping to Stage 2
+[06:26:58]   Memory cleanup before pair counts...
+[06:26:58]   Worker pool terminated
+[06:26:58]   Available memory: 518.4 GB
+[06:26:58] STAGE 2: Computing pair counts by environment bin
+[06:26:58]   STAGE 2 outputs exist - skipping to STAGE 3
+[06:26:58] STAGE 3: Computing covariance matrix
+[06:26:58]   Using jackknife covariance (method=jackknife)
+[06:27:00]   Jackknife loop: 100 regions
+[06:27:00]   Precomputing RR with all randoms...
