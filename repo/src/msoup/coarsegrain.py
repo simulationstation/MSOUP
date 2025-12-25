@@ -7,6 +7,14 @@ from typing import Iterable
 import numpy as np
 
 from .constraints import ConstraintPair, ConstraintSystem
+from .gf2 import gf2_rank
+
+
+@dataclass(frozen=True)
+class DeltaMCoarsegrainResult:
+    block_size: int
+    map_name: str
+    delta_m: int
 
 
 @dataclass(frozen=True)
@@ -81,4 +89,44 @@ def coarsegrain_random(
                 delta_m=coarse.delta_m,
             )
         )
+    return results
+
+
+def block_sum_projection(n: int, block_size: int) -> np.ndarray:
+    return block_projection(n, block_size)
+
+
+def seeded_random_projection(
+    rng: np.random.Generator,
+    n: int,
+    n_blocks: int,
+    density: float = 0.5,
+) -> np.ndarray:
+    return randomized_projection(rng, n, n_blocks, density=density)
+
+
+def coarsegrain_delta_m(
+    a_minus: np.ndarray,
+    a_plus: np.ndarray,
+    block_sizes: Iterable[int],
+    rng: np.random.Generator,
+    density: float = 0.5,
+) -> list[DeltaMCoarsegrainResult]:
+    results: list[DeltaMCoarsegrainResult] = []
+    n_vars = a_minus.shape[1]
+    for block_size in block_sizes:
+        n_blocks = int(np.ceil(n_vars / block_size))
+        proj_block = block_sum_projection(n_vars, block_size)
+        proj_random = seeded_random_projection(rng, n_vars, n_blocks, density=density)
+        for name, projection in ("block", proj_block), ("random", proj_random):
+            minus_cg = (a_minus @ projection) % 2
+            plus_cg = (a_plus @ projection) % 2
+            delta_m = gf2_rank(plus_cg) - gf2_rank(minus_cg)
+            results.append(
+                DeltaMCoarsegrainResult(
+                    block_size=block_size,
+                    map_name=name,
+                    delta_m=delta_m,
+                )
+            )
     return results
