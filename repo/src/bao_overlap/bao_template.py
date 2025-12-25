@@ -68,6 +68,46 @@ def bao_template(
     return xi
 
 
+def bao_template_damped(
+    s: np.ndarray,
+    r_d: float,
+    sigma_nl: float,
+    omega_m: float,
+    omega_b: float,
+    h: float,
+    n_s: float,
+    sigma8: float,
+    k_min: float = 1.0e-3,
+    k_max: float = 10.0,
+    n_k: int = 1024,
+) -> np.ndarray:
+    """Compute BAO template using damped wiggle/no-wiggle decomposition."""
+    k = np.logspace(np.log10(k_min), np.log10(k_max), n_k)
+    t0 = _transfer_no_wiggle(k, omega_m=omega_m, h=h)
+    f_b = omega_b / omega_m
+    r_d_h = r_d * h
+
+    p_nowiggle = k**n_s * (t0**2)
+    wiggle = 1.0 + f_b * np.sin(k * r_d_h) / np.maximum(k * r_d_h, 1.0e-8)
+    p_lin = p_nowiggle * wiggle
+    p_wiggle = p_lin - p_nowiggle
+
+    sigma8_unscaled = _sigma_r(k, p_lin, radius=8.0)
+    if sigma8_unscaled > 0:
+        scale = (sigma8 / sigma8_unscaled) ** 2
+        p_nowiggle = p_nowiggle * scale
+        p_wiggle = p_wiggle * scale
+
+    damping = np.exp(-0.5 * (k * sigma_nl) ** 2)
+    pk = p_nowiggle + p_wiggle * damping
+
+    ks = np.outer(k, s)
+    j0 = np.sinc(ks / np.pi)
+    integrand = k[:, None] ** 2 * pk[:, None] * j0
+    xi = np.trapz(integrand, k, axis=0) / (2.0 * np.pi**2)
+    return xi
+
+
 def model_xi(
     s: np.ndarray,
     alpha: float,
