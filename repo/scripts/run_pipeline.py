@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Number of parallel workers
-N_JOBS = min(4, max(1, int(os.environ.get("BAO_N_JOBS", 4))))
+N_JOBS = min(12, max(1, int(os.environ.get("BAO_N_JOBS", 12))))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:
@@ -748,7 +748,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
             status(f"  [JK] Processing iterations {batch_start}-{batch_end-1}/{n_jk-1}...", output_dir)
 
-            jk_results = Parallel(n_jobs=N_JOBS, verbose=0, batch_size=1)(
+            jk_results = Parallel(n_jobs=N_JOBS, verbose=10, batch_size=1)(
                 delayed(_jk_iteration)(
                     idx=idx,
                     data_xyz_all=data_xyz_all,
