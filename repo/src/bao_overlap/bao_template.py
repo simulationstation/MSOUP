@@ -16,6 +16,25 @@ def _transfer_no_wiggle(k: np.ndarray, omega_m: float, h: float) -> np.ndarray:
     return l0 / (l0 + c0 * q**2)
 
 
+def _tophat_window(x: np.ndarray) -> np.ndarray:
+    """Spherical top-hat window function in Fourier space."""
+    x = np.asarray(x)
+    window = np.ones_like(x)
+    mask = x != 0.0
+    x_m = x[mask]
+    window[mask] = 3.0 * (np.sin(x_m) - x_m * np.cos(x_m)) / x_m**3
+    return window
+
+
+def _sigma_r(k: np.ndarray, pk: np.ndarray, radius: float) -> float:
+    """Return sigma(R) for a power spectrum P(k) and radius in Mpc/h."""
+    kr = k * radius
+    window = _tophat_window(kr)
+    integrand = k**2 * pk * window**2
+    sigma2 = np.trapz(integrand, k) / (2.0 * np.pi**2)
+    return float(np.sqrt(max(sigma2, 0.0)))
+
+
 def bao_template(
     s: np.ndarray,
     r_d: float,
@@ -24,16 +43,23 @@ def bao_template(
     omega_b: float,
     h: float,
     n_s: float,
+    sigma8: float,
     k_min: float = 1.0e-3,
-    k_max: float = 0.6,
-    n_k: int = 512,
+    k_max: float = 10.0,
+    n_k: int = 1024,
 ) -> np.ndarray:
     """Compute a standard BAO template from a damped linear power spectrum."""
     k = np.logspace(np.log10(k_min), np.log10(k_max), n_k)
     t0 = _transfer_no_wiggle(k, omega_m=omega_m, h=h)
     f_b = omega_b / omega_m
-    wiggle = 1.0 + f_b * np.exp(-(k * sigma_nl) ** 2) * np.sin(k * r_d) / np.maximum(k * r_d, 1.0e-8)
-    pk = k**n_s * (t0**2) * wiggle
+    r_d_h = r_d * h
+    wiggle = 1.0 + f_b * np.exp(-(k * sigma_nl) ** 2) * np.sin(k * r_d_h) / np.maximum(k * r_d_h, 1.0e-8)
+    pk_shape = k**n_s * (t0**2) * wiggle
+    sigma8_unscaled = _sigma_r(k, pk_shape, radius=8.0)
+    if sigma8_unscaled > 0:
+        pk = pk_shape * (sigma8 / sigma8_unscaled) ** 2
+    else:
+        pk = pk_shape
 
     ks = np.outer(k, s)
     j0 = np.sinc(ks / np.pi)
@@ -52,6 +78,7 @@ def model_xi(
     omega_b: float,
     h: float,
     n_s: float,
+    sigma8: float,
     nuisance: np.ndarray,
 ) -> np.ndarray:
     template = bao_template(
@@ -62,5 +89,6 @@ def model_xi(
         omega_b=omega_b,
         h=h,
         n_s=n_s,
+        sigma8=sigma8,
     )
     return bias**2 * template + nuisance

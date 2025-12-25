@@ -60,6 +60,7 @@ def fit_wedge(
             omega_b=template_params["omega_b"],
             h=template_params["h"],
             n_s=template_params["n_s"],
+            sigma8=template_params["sigma8"],
         )
         design = np.column_stack([template, nuisance])
         lhs = design.T @ inv_cov @ design
