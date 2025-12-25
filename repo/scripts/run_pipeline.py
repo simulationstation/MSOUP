@@ -31,12 +31,8 @@ def status(msg: str, output_dir: Path | None = None) -> None:
 
 from bao_overlap.blinding import BlindState, compute_prereg_hash, initialize_blinding, save_blinded_results
 from bao_overlap.correlation import (
-    combine_pair_counts,
-    compute_pair_counts_simple,
-    compute_pair_counts_by_environment,
-    landy_szalay,
+    compute_xi_s_mu,
     parse_wedge_bounds,
-    PairCounts,
     wedge_xi,
 )
 from bao_overlap.covariance import (
@@ -96,25 +92,21 @@ def _jk_iteration(
         ]
     )
 
-    counts_by_bin = compute_pair_counts_by_environment(
-        data_xyz_all[data_mask],
-        rand_xyz_all[rand_mask],
-        env_bin_all[data_mask],
-        rand_bin_all[rand_mask],
-        n_bins=n_bins,
-        s_edges=s_edges,
-        mu_edges=mu_edges,
-        data_weights=data_w_all[data_mask],
-        rand_weights=rand_w_all[rand_mask],
-        rand_weights_by_bin=rand_weights_by_bin,
-        verbose=False,
-        pair_counter=compute_pair_counts_simple,
-        precomputed_rr=None,
-    )
-
     vecs = []
     for b in range(n_bins):
-        xi_bin = landy_szalay(counts_by_bin[b])
+        bin_mask = data_mask & (env_bin_all == b)
+        if not np.any(bin_mask):
+            xi_bin = np.zeros((len(s_edges) - 1, len(mu_edges) - 1))
+        else:
+            xi_bin = compute_xi_s_mu(
+                data_xyz_all[bin_mask],
+                rand_xyz_all[rand_mask],
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                data_weights=data_w_all[bin_mask],
+                rand_weights=rand_weights_by_bin[b],
+                verbose=False,
+            ).xi
         vecs.append(np.mean(xi_bin, axis=1))
     return np.concatenate(vecs)
 
@@ -137,10 +129,6 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     (output_dir / "prereg_hash.txt").write_text(prereg_hash, encoding="utf-8")
 
     dry_run_fraction = cfg.get("runtime", {}).get("dry_run_fraction") if dry_run else None
-    validation_mode = bool(
-        cfg.get("runtime", {}).get("validation_mode", False)
-        or os.environ.get("BAO_VALIDATION_MODE", "").lower() in {"1", "true", "yes"}
-    )
     regions = prereg["primary_dataset"]["regions"]
 
     cosmo_cfg = prereg["fiducial_cosmology"]
@@ -529,103 +517,14 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     except FileNotFoundError:
         pass
 
-    status("STAGE 2: Computing pair counts by environment bin", output_dir)
+    status("STAGE 2: Computing xi by environment bin", output_dir)
 
-    # Check if STAGE 2 outputs already exist (resume support) - MUST CHECK FIRST
-    pair_counts_path = output_dir / "pair_counts_by_Ebin.npz"
     xi_wedge_path = output_dir / "xi_wedge_by_Ebin.npz"
-    stage2_complete = pair_counts_path.exists() and xi_wedge_path.exists()
+    stage2_complete = xi_wedge_path.exists()
 
     if stage2_complete:
         status("  STAGE 2 outputs exist - skipping to STAGE 3", output_dir)
 
-    # Only run pair counting if not already complete
-    if not stage2_complete:
-        # Check for checkpoint file
-        pair_counts_checkpoint = output_dir / "pair_counts_checkpoint.npz"
-        counts_by_region: Dict[str, Dict[int, Any]] = {r: {} for r in regions}
-        counts_all_regions = []
-
-        if pair_counts_checkpoint.exists():
-            status("  Resuming from pair counts checkpoint...", output_dir)
-            ckpt = np.load(pair_counts_checkpoint, allow_pickle=True)
-            completed_bins = int(ckpt["completed_bins"])
-            status(f"  Found checkpoint with {completed_bins} bins completed", output_dir)
-            # Load completed bins
-            for region in regions:
-                for b in range(completed_bins):
-                    counts_by_region[region][b] = PairCounts(
-                        s_edges=s_edges,
-                        mu_edges=mu_edges,
-                        dd=ckpt[f"dd_{region}_{b}"],
-                        dr=ckpt[f"dr_{region}_{b}"],
-                        rr=ckpt[f"rr_{region}_{b}"],
-                        meta={"loaded_from_checkpoint": True},
-                    )
-            start_bin = completed_bins
-        else:
-            start_bin = 0
-
-        # Process bins one at a time with memory cleanup
-        import gc
-        for b in range(start_bin, n_bins):
-            status(f"  Processing E-bin {b}/{n_bins-1}...", output_dir)
-            t0 = time.time()
-
-            for region in regions:
-                region_payload = per_region[region]
-                data_mask = region_payload["env_bin"] == b
-
-                if not np.any(data_mask):
-                    counts_by_region[region][b] = PairCounts(
-                        s_edges=s_edges, mu_edges=mu_edges,
-                        dd=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                        dr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                        rr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                        meta={"n_data": 0},
-                    )
-                    continue
-
-                counts = compute_pair_counts_simple(
-                    region_payload["data_xyz"][data_mask],
-                    region_payload["rand_xyz"],
-                    s_edges=s_edges,
-                    mu_edges=mu_edges,
-                    data_weights=region_payload["data_w"][data_mask],
-                    rand_weights=apply_f_b_weights(
-                        region_payload["rand_w"],
-                        region_payload["rand_cell_keys"],
-                        f_b_grid,
-                        b,
-                    ),
-                    verbose=False,
-                )
-                counts_by_region[region][b] = counts
-                status(f"    {region} bin {b}: {np.sum(data_mask)} galaxies ({time.time()-t0:.1f}s)", output_dir)
-
-            # Save checkpoint after each bin
-            ckpt_data = {"completed_bins": np.array([b + 1])}
-            for region in regions:
-                for bb in range(b + 1):
-                    ckpt_data[f"dd_{region}_{bb}"] = counts_by_region[region][bb].dd
-                    ckpt_data[f"dr_{region}_{bb}"] = counts_by_region[region][bb].dr
-                    ckpt_data[f"rr_{region}_{bb}"] = counts_by_region[region][bb].rr
-            np.savez(pair_counts_checkpoint, **ckpt_data)
-            status(f"  Checkpoint saved (bin {b} done)", output_dir)
-
-            # Memory cleanup
-            gc.collect()
-            try:
-                with open('/proc/meminfo') as f:
-                    for line in f:
-                        if line.startswith('MemAvailable:'):
-                            avail = int(line.split()[1]) / 1e6
-                            status(f"  Memory: {avail:.1f} GB available", output_dir)
-                            break
-            except:
-                pass
-
-    # Load STAGE 2 results (either just computed or from existing files)
     if stage2_complete:
         xi_data = np.load(xi_wedge_path)
         xi_tangential = xi_data["xi_tangential"]
@@ -638,150 +537,69 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         env_bin_edges = xi_data["E_bin_edges"]
         env_bin_centers = xi_data["E_bin_centers"]
     else:
-        # Compute combined counts for all regions
-        status("  Computing combined region counts...", output_dir)
-        for region in regions:
-            region_payload = per_region[region]
-            counts_all_regions.append(
-                compute_pair_counts_simple(
-                    region_payload["data_xyz"],
-                    region_payload["rand_xyz"],
-                    s_edges=s_edges,
-                    mu_edges=mu_edges,
-                    data_weights=region_payload["data_w"],
-                    rand_weights=region_payload["rand_w"],
-                    verbose=False,
-                )
-            )
-            gc.collect()
+        data_xyz_all = np.vstack(all_xyz)
+        rand_xyz_all = np.vstack(all_rand_xyz)
+        data_w_all = np.concatenate(all_data_w)
+        rand_w_all = np.concatenate(all_rand_w)
+        rand_cell_keys_all = np.concatenate([per_region[r]["rand_cell_keys"] for r in regions])
 
-        counts_by_bin_combined = {}
-        for b in range(n_bins):
-            counts_by_bin_combined[b] = combine_pair_counts([counts_by_region[reg][b] for reg in regions])
-
-        combined_counts = combine_pair_counts(counts_all_regions)
-        xi_all = landy_szalay(combined_counts)
+        status("  Computing xi(s,mu) for all data...", output_dir)
+        xi_all = compute_xi_s_mu(
+            data_xyz_all,
+            rand_xyz_all,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_w_all,
+            rand_weights=rand_w_all,
+            verbose=False,
+        ).xi
         xi_tangential_all = wedge_xi(xi_all, mu_edges, tangential_bounds)
         xi_radial_all = wedge_xi(xi_all, mu_edges, radial_bounds)
         xi_monopole_all = np.mean(xi_all, axis=1)
+
+        tail_mask = s_centers > 155
+        if np.any(tail_mask):
+            tail_max = max(
+                float(np.max(np.abs(xi_tangential_all[tail_mask]))),
+                float(np.max(np.abs(xi_monopole_all[tail_mask]))),
+            )
+            if tail_max > 0.02:
+                raise RuntimeError(
+                    "Validation FAIL: xi_all tail max|xi| at s>155 exceeds 0.02 "
+                    f"(max={tail_max:.3f}). Aborting before JK/covariance."
+                )
 
         xi_tangential = np.zeros((n_bins, len(s_centers)))
         xi_radial = np.zeros((n_bins, len(s_centers)))
         xi_monopole = np.zeros((n_bins, len(s_centers)))
 
         for b in range(n_bins):
-            xi_bin = landy_szalay(counts_by_bin_combined[b])
+            data_mask = env_bins_all == b
+            if not np.any(data_mask):
+                xi_bin = np.zeros((len(s_edges) - 1, len(mu_edges) - 1))
+            else:
+                rand_weights_b = apply_f_b_weights(
+                    rand_w_all,
+                    rand_cell_keys_all,
+                    f_b_grid,
+                    b,
+                )
+                xi_bin = compute_xi_s_mu(
+                    data_xyz_all[data_mask],
+                    rand_xyz_all,
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    data_weights=data_w_all[data_mask],
+                    rand_weights=rand_weights_b,
+                    verbose=False,
+                ).xi
+
             xi_tangential[b] = wedge_xi(xi_bin, mu_edges, tangential_bounds)
             xi_radial[b] = wedge_xi(xi_bin, mu_edges, radial_bounds)
             xi_monopole[b] = np.mean(xi_bin, axis=1)
 
-        data_xyz_all = np.vstack(all_xyz)
-        data_w_all = np.concatenate(all_data_w)
-        valid_mask = env_bins_all >= 0
-        dd_all_valid = compute_pair_counts_simple(
-            data_xyz_all[valid_mask],
-            data_xyz_all[valid_mask],
-            s_edges=s_edges,
-            mu_edges=mu_edges,
-            data_weights=data_w_all[valid_mask],
-            rand_weights=data_w_all[valid_mask],
-            verbose=False,
-        ).dd
-        dd_within = np.sum([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
-        dd_cross = np.zeros_like(dd_within)
-        for i in range(n_bins):
-            mask_i = env_bins_all == i
-            if not np.any(mask_i):
-                continue
-            for j in range(i + 1, n_bins):
-                mask_j = env_bins_all == j
-                if not np.any(mask_j):
-                    continue
-                cross_counts = compute_pair_counts_simple(
-                    data_xyz_all[mask_i],
-                    data_xyz_all[mask_j],
-                    s_edges=s_edges,
-                    mu_edges=mu_edges,
-                    data_weights=data_w_all[mask_i],
-                    rand_weights=data_w_all[mask_j],
-                    verbose=False,
-                    skip_rr=True,
-                )
-                dd_cross += cross_counts.dr
-
-        dd_reconstructed = dd_within + dd_cross
-        diff = dd_reconstructed - dd_all_valid
-        abs_diff = np.abs(diff)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rel_diff = np.where(dd_all_valid != 0, abs_diff / np.abs(dd_all_valid), 0.0)
-
         paper_package_dir = Path(__file__).resolve().parents[1] / "paper_package"
         _ensure_dir(paper_package_dir)
-        normalization_summary = {
-            "dd_all_sum": float(dd_all_valid.sum()),
-            "dd_within_sum": float(dd_within.sum()),
-            "dd_cross_sum": float(dd_cross.sum()),
-            "max_abs_diff": float(np.max(abs_diff)),
-            "mean_abs_diff": float(np.mean(abs_diff)),
-            "max_rel_diff": float(np.max(rel_diff)),
-            "mean_rel_diff": float(np.mean(rel_diff)),
-            "valid_data_count": int(np.sum(valid_mask)),
-        }
-        with open(paper_package_dir / "normalization_checks.json", "w", encoding="utf-8") as handle:
-            json.dump(normalization_summary, handle, indent=2)
-
-        large_s_target = 177.5
-        large_s_idx = int(np.argmin(np.abs(s_centers - large_s_target)))
-        large_s_center = float(s_centers[large_s_idx])
-
-        def _drn_rrn_stats(counts: PairCounts) -> Dict[str, float]:
-            sum_w_data = counts.meta.get("sum_w_data", 0.0)
-            sum_w_rand = counts.meta.get("sum_w_rand", 0.0)
-            sum_w_data_sq = counts.meta.get("sum_w_data_sq", sum_w_data)
-            sum_w_rand_sq = counts.meta.get("sum_w_rand_sq", sum_w_rand)
-            norm_rr = max((sum_w_rand**2 - sum_w_rand_sq) / 2.0, 1.0)
-            norm_dr = max(sum_w_data * sum_w_rand, 1.0)
-            dr_norm = counts.dr[large_s_idx] / norm_dr
-            rr_norm = counts.rr[large_s_idx] / norm_rr
-            ratio = np.where(rr_norm > 0, dr_norm / rr_norm, 0.0)
-            return {
-                "median": float(np.median(ratio)),
-                "mean": float(np.mean(ratio)),
-                "median_abs_diff": float(np.median(np.abs(ratio - 1.0))),
-            }
-
-        normalization_checks_by_bin = {
-            "s_target": large_s_target,
-            "s_center": large_s_center,
-            "bins": {},
-        }
-        failed_bins = []
-        for b in range(n_bins):
-            counts = counts_by_bin_combined[b]
-            stats = _drn_rrn_stats(counts)
-            if stats["median_abs_diff"] > 0.05:
-                failed_bins.append(b)
-            normalization_checks_by_bin["bins"][str(b)] = {
-                "sum_wD_bin": float(counts.meta.get("sum_w_data", 0.0)),
-                "sum_wR_b": float(counts.meta.get("sum_w_rand", 0.0)),
-                "N_DD_bin": float(np.sum(counts.dd)),
-                "N_DR_bin": float(np.sum(counts.dr)),
-                "N_RR_b": float(np.sum(counts.rr)),
-                "DRn_over_RRn_median": stats["median"],
-                "DRn_over_RRn_mean": stats["mean"],
-                "median_abs_DRn_over_RRn_minus_1": stats["median_abs_diff"],
-            }
-
-        validation_status = "FAIL" if failed_bins else "PASS"
-        normalization_checks_by_bin["validation"] = {
-            "mode": validation_mode,
-            "status": validation_status,
-            "threshold": 0.05,
-            "failed_bins": failed_bins,
-        }
-
-        with open(paper_package_dir / "normalization_checks_by_bin.json", "w", encoding="utf-8") as handle:
-            json.dump(normalization_checks_by_bin, handle, indent=2)
 
         s_targets = [102.5, 177.5]
         s_indices = [int(np.argmin(np.abs(s_centers - target))) for target in s_targets]
@@ -795,12 +613,6 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 for target, idx in zip(s_targets, s_indices)
             },
             "xi_by_bin": {},
-            "drn_over_rrn_by_bin": {
-                str(b): normalization_checks_by_bin["bins"][str(b)][
-                    "DRn_over_RRn_median"
-                ]
-                for b in range(n_bins)
-            },
         }
         for b in range(n_bins):
             xi_report["xi_by_bin"][str(b)] = {
@@ -810,30 +622,6 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
         with open(paper_package_dir / "report_per_bin_xi_sanity.json", "w", encoding="utf-8") as handle:
             json.dump(xi_report, handle, indent=2)
-
-        if validation_mode and failed_bins:
-            raise RuntimeError(
-                "Validation FAIL: median |DRn/RRn - 1| exceeds 0.05 for bins "
-                f"{failed_bins} at s={large_s_center:.1f}."
-            )
-
-        dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
-        dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
-        rr_combined = np.stack([counts_by_bin_combined[b].rr for b in range(n_bins)], axis=0)
-
-        save_payload: Dict[str, Any] = {
-            "dd": dd_combined,
-            "dr": dr_combined,
-            "rr": rr_combined,
-            "s_edges": s_edges,
-            "mu_edges": mu_edges,
-            "n_bins": np.array([n_bins], dtype=int),
-        }
-        for region in regions:
-            save_payload[f"dd_{region.lower()}"] = np.stack([counts_by_region[region][b].dd for b in range(n_bins)], axis=0)
-            save_payload[f"dr_{region.lower()}"] = np.stack([counts_by_region[region][b].dr for b in range(n_bins)], axis=0)
-            save_payload[f"rr_{region.lower()}"] = np.stack([counts_by_region[region][b].rr for b in range(n_bins)], axis=0)
-        np.savez(pair_counts_path, **save_payload)
 
         np.savez(
             xi_wedge_path,
@@ -1257,7 +1045,6 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         (output_dir / "metadata.json", paper_package / "metadata.json"),
         (e_by_galaxy_path, paper_package / "E_by_galaxy.npz"),
         (output_dir / "environment_assignment_diagnostics.json", paper_package / "environment_assignment_diagnostics.json"),
-        (pair_counts_path, paper_package / "pair_counts_by_Ebin.npz"),
         (xi_wedge_path, paper_package / "xi_wedge_by_Ebin.npz"),
         (alpha_by_bin_path, paper_package / "alpha_by_Ebin.json"),
         (cov_path, paper_package / "covariance" / "xi_wedge_covariance.npy"),

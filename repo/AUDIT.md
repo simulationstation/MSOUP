@@ -242,3 +242,27 @@ E1 bin membership is position-dependent, so per-bin DR/RR counts must use
 random weights reweighted by the selection function f_b(θ, z) to prevent
 Landy–Szalay cancellation bias. The selection function is computed using
 NSIDE=32 and dz=0.05 over z ∈ [0.6, 1.0].
+
+## TreeCorr Xi Normalization Fix (2025-02-14)
+
+### Failure Evidence
+- Randoms-as-data null test with the previous `count_pairs_s_mu` + manual Landy–Szalay normalization produced large tail values (|xi| ≈ 0.7 at s>155).
+- TreeCorr’s internal xi on the same catalogs produced a near-zero tail (|xi| ≈ 0.011), indicating the manual normalization path was broken.
+
+### Fix Summary
+- Removed the production path that computed xi from extracted DD/DR/RR arrays.
+- Switched to TreeCorr’s NNCorrelation/NNCrossCorrelation normalization, using its xi output as the source of truth.
+- Computed xi(s,mu) in TreeCorr’s (rp,pi) grid and rebinned to (s,mu) via RR-weighted averaging, then derived wedges/monopole by mu-averaging.
+- Preserved weights (FKP/systematics/etc.) and applied per-bin f_b weights by multiplying random weights before passing to TreeCorr.
+- Added a validation gate that halts before JK/covariance if xi_all tail max|xi| at s>155 exceeds 0.02.
+
+### Test Outputs (Local Environment)
+TreeCorr is not available in this environment, so the requested validation runs could not execute with the TreeCorr backend.
+
+**Randoms-as-data null test (requested):**
+- Command: `PYTHONPATH=src pytest tests/test_treecorr_xi_pipeline.py -k randoms_as_data_null_tail`
+- Result: **SKIPPED** (TreeCorr not available)
+
+**ALL-sample xi sanity (requested, small sample):**
+- Command: `PYTHONPATH=src python - <<'PY' ... PY`
+- Result: **FAILED** (RuntimeError: TreeCorr is required to compute xi(s, mu))
