@@ -227,3 +227,10 @@ This change is made **before inspecting any blinded results** from the full prod
 
 ### Blinding Status
 - **No unblinding occurred**: only normalization/template infrastructure changed; no results were decrypted or inspected.
+
+## Per-bin Random Reweighting (2025-12-24)
+
+E1 bin membership is position-dependent, so per-bin DR/RR counts must use
+random weights reweighted by the selection function f_b(θ, z) to prevent
+Landy–Szalay cancellation bias. The selection function is computed using
+NSIDE=32 and dz=0.05 over z ∈ [0.6, 1.0].
