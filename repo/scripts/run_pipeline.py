@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 # Number of parallel workers
-N_JOBS = min(12, max(1, int(os.environ.get("BAO_N_JOBS", 12))))
+N_JOBS = min(50, max(1, int(os.environ.get("BAO_N_JOBS", 50))))
 
 
 def status(msg: str, output_dir: Path | None = None) -> None:
@@ -740,7 +740,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             status(f"  Resumed from iteration {start_idx}/{n_jk}", output_dir)
 
         # Process in batches for checkpointing (batch_size iterations, then save)
-        jk_batch_size = 10  # Save checkpoint every 10 iterations
+        jk_batch_size = 50  # Save checkpoint every 50 iterations
 
         for batch_start in range(start_idx, n_jk, jk_batch_size):
             batch_end = min(batch_start + jk_batch_size, n_jk)
