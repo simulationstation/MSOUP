@@ -57,6 +57,15 @@ class PairCounts:
     meta: Dict[str, float]
 
 
+@dataclass
+class XiResult:
+    """Container for xi(s, mu) results."""
+    s_edges: np.ndarray
+    mu_edges: np.ndarray
+    xi: np.ndarray  # Shape: (n_s_bins, n_mu_bins)
+    meta: Dict[str, float]
+
+
 def compute_pair_counts(
     data_xyz: np.ndarray,
     rand_xyz: np.ndarray,
@@ -137,7 +146,6 @@ def compute_pair_counts(
 
     # TreeCorr configuration for 3D correlation
     # We compute in (rp, pi) space and transform to (s, mu)
-    s_min = s_edges[0]
     s_max = s_edges[-1]
 
     # For (s, mu) binning, we use NNCorrelation in 3D mode
@@ -438,6 +446,187 @@ def _rebin_rp_pi_to_s_mu(
                     counts_s_mu[s_idx, mu_idx] += counts_rp_pi[i, j]
 
     return counts_s_mu
+
+
+def _rebin_rp_pi_to_s_mu_weighted(
+    values_rp_pi: np.ndarray,
+    weights_rp_pi: Optional[np.ndarray],
+    rp_centers: np.ndarray,
+    pi_centers: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+) -> np.ndarray:
+    """Rebin values from (rp, pi) grid to (s, mu) with optional weights."""
+    n_s = len(s_edges) - 1
+    n_mu = len(mu_edges) - 1
+    accum = np.zeros((n_s, n_mu))
+    weight_sum = np.zeros((n_s, n_mu))
+
+    use_weights = weights_rp_pi is not None
+
+    for i, rp in enumerate(rp_centers):
+        for j, pi in enumerate(pi_centers):
+            s = np.sqrt(rp**2 + pi**2)
+            mu = abs(pi) / max(s, 1e-10)
+
+            s_idx = np.searchsorted(s_edges, s) - 1
+            mu_idx = np.searchsorted(mu_edges, mu) - 1
+            if 0 <= s_idx < n_s and 0 <= mu_idx < n_mu:
+                if i < values_rp_pi.shape[0] and j < values_rp_pi.shape[1]:
+                    w = weights_rp_pi[i, j] if use_weights else 1.0
+                    accum[s_idx, mu_idx] += values_rp_pi[i, j] * w
+                    weight_sum[s_idx, mu_idx] += w
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rebinned = np.where(weight_sum > 0, accum / weight_sum, 0.0)
+    return rebinned
+
+
+def compute_xi_s_mu(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+    verbose: bool = True,
+) -> XiResult:
+    """Compute xi(s, mu) using TreeCorr's internal normalization."""
+    _check_memory()
+
+    n_data = len(data_xyz)
+    n_rand = len(rand_xyz)
+    n_s_bins = len(s_edges) - 1
+
+    if verbose:
+        print(f"Computing xi(s,mu): {n_data:,} data × {n_rand:,} randoms")
+
+    if data_weights is None:
+        data_weights = np.ones(n_data)
+    if rand_weights is None:
+        rand_weights = np.ones(n_rand)
+
+    data_weights = np.asarray(data_weights, dtype="f8")
+    rand_weights = np.asarray(rand_weights, dtype="f8")
+
+    if not HAS_TREECORR:
+        raise RuntimeError("TreeCorr is required to compute xi(s, mu).")
+
+    data_cat = treecorr.Catalog(
+        x=data_xyz[:, 0],
+        y=data_xyz[:, 1],
+        z=data_xyz[:, 2],
+        w=data_weights,
+    )
+    rand_cat = treecorr.Catalog(
+        x=rand_xyz[:, 0],
+        y=rand_xyz[:, 1],
+        z=rand_xyz[:, 2],
+        w=rand_weights,
+    )
+
+    s_max = s_edges[-1]
+    pi_max = s_max
+
+    config_2d = {
+        'min_rpar': -pi_max,
+        'max_rpar': pi_max,
+        'nbins_rpar': n_s_bins,
+        'min_sep': 0.1,
+        'max_sep': s_max,
+        'nbins': n_s_bins,
+        'bin_type': 'Linear',
+        'num_threads': TREECORR_NTHREADS,
+        'verbose': 1 if verbose else 0,
+    }
+
+    if verbose:
+        print("  Computing TreeCorr NNCorrelation...")
+    dd_corr = treecorr.NNCorrelation(**config_2d)
+    dr_corr = treecorr.NNCorrelation(**config_2d)
+    rr_corr = treecorr.NNCorrelation(**config_2d)
+
+    dd_corr.process(data_cat)
+    dr_corr.process(data_cat, rand_cat)
+    rr_corr.process(rand_cat)
+
+    dd_corr.calculateXi(rr=rr_corr, dr=dr_corr)
+    xi_rp_pi = dd_corr.xi
+
+    rp_centers = dd_corr.rnom
+    pi_edges = np.linspace(-pi_max, pi_max, n_s_bins + 1)
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+
+    rr_weight = rr_corr.weight if hasattr(rr_corr, "weight") else rr_corr.npairs
+    xi_s_mu = _rebin_rp_pi_to_s_mu_weighted(
+        xi_rp_pi,
+        rr_weight,
+        rp_centers,
+        pi_centers,
+        s_edges,
+        mu_edges,
+    )
+
+    meta = {
+        "n_data": n_data,
+        "n_rand": n_rand,
+        "sum_w_data": float(data_weights.sum()),
+        "sum_w_rand": float(rand_weights.sum()),
+        "mode": "treecorr_xi",
+    }
+    return XiResult(
+        s_edges=s_edges,
+        mu_edges=mu_edges,
+        xi=xi_s_mu,
+        meta=meta,
+    )
+
+
+def compute_xi_by_environment(
+    data_xyz: np.ndarray,
+    rand_xyz: np.ndarray,
+    data_bins: np.ndarray,
+    n_bins: int,
+    s_edges: np.ndarray,
+    mu_edges: np.ndarray,
+    data_weights: Optional[np.ndarray] = None,
+    rand_weights: Optional[np.ndarray] = None,
+    rand_weights_by_bin: Optional[np.ndarray] = None,
+    verbose: bool = True,
+) -> Dict[int, XiResult]:
+    """Compute xi(s,mu) per environment bin using TreeCorr normalization."""
+    xi_by_bin: Dict[int, XiResult] = {}
+
+    if data_weights is None:
+        data_weights = np.ones(len(data_xyz))
+    if rand_weights is None:
+        rand_weights = np.ones(len(rand_xyz))
+
+    for b in range(n_bins):
+        data_mask = data_bins == b
+        if not np.any(data_mask):
+            xi_by_bin[b] = XiResult(
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                xi=np.zeros((len(s_edges) - 1, len(mu_edges) - 1)),
+                meta={"n_data": 0, "n_rand": len(rand_xyz)},
+            )
+            continue
+
+        rand_weights_b = rand_weights
+        if rand_weights_by_bin is not None:
+            rand_weights_b = rand_weights_by_bin[b]
+
+        xi_by_bin[b] = compute_xi_s_mu(
+            data_xyz[data_mask],
+            rand_xyz,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_weights[data_mask],
+            rand_weights=rand_weights_b,
+            verbose=verbose,
+        )
+    return xi_by_bin
 
 
 def compute_pair_counts_simple(

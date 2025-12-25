@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from bao_overlap.blinding import BlindState
-from bao_overlap.correlation import compute_pair_counts, landy_szalay, parse_wedge_bounds, wedge_xi
+from bao_overlap.correlation import compute_xi_s_mu, parse_wedge_bounds, wedge_xi
 from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.io import load_run_config, load_catalog
@@ -93,8 +93,14 @@ def main() -> None:
             corr_cfg["mu_max"] + corr_cfg["mu_bin"],
             corr_cfg["mu_bin"],
         )
-        counts = compute_pair_counts(data_xyz, rand_xyz, s_edges=s_edges, mu_edges=mu_edges)
-        xi = landy_szalay(counts)
+        xi = compute_xi_s_mu(
+            data_xyz,
+            rand_xyz,
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_cat.w,
+            rand_weights=rand_cat.w,
+        ).xi
         tangential = wedge_xi(xi, mu_edges, parse_wedge_bounds(prereg["correlation"]["wedges"]["tangential"]))
         np.savez(output_dir / "correlation.npz", xi=xi, tangential=tangential)
         return
