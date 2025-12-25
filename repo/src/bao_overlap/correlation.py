@@ -219,14 +219,17 @@ def compute_pair_counts(
     # Get pair counts arrays
     # TreeCorr's 2D correlation stores in (rp, pi) shape
     if hasattr(dd_corr, 'npairs') and dd_corr.npairs.ndim == 2:
-        dd_rp_pi = dd_corr.npairs
-        dr_rp_pi = dr_corr.npairs
-        rr_rp_pi = rr_corr.npairs
+        dd_rp_pi = dd_corr.weight if hasattr(dd_corr, "weight") else dd_corr.npairs
+        dr_rp_pi = dr_corr.weight if hasattr(dr_corr, "weight") else dr_corr.npairs
+        rr_rp_pi = rr_corr.weight if hasattr(rr_corr, "weight") else rr_corr.npairs
     else:
         # Fallback: 1D binning, tile to create 2D
-        dd_rp_pi = np.tile(dd_corr.npairs[:, np.newaxis], (1, n_mu_bins))
-        dr_rp_pi = np.tile(dr_corr.npairs[:, np.newaxis], (1, n_mu_bins))
-        rr_rp_pi = np.tile(rr_corr.npairs[:, np.newaxis], (1, n_mu_bins))
+        dd_base = dd_corr.weight if hasattr(dd_corr, "weight") else dd_corr.npairs
+        dr_base = dr_corr.weight if hasattr(dr_corr, "weight") else dr_corr.npairs
+        rr_base = rr_corr.weight if hasattr(rr_corr, "weight") else rr_corr.npairs
+        dd_rp_pi = np.tile(dd_base[:, np.newaxis], (1, n_mu_bins))
+        dr_rp_pi = np.tile(dr_base[:, np.newaxis], (1, n_mu_bins))
+        rr_rp_pi = np.tile(rr_base[:, np.newaxis], (1, n_mu_bins))
 
     # Rebin from (rp, pi) to (s, mu)
     dd_s_mu = _rebin_rp_pi_to_s_mu(
@@ -496,8 +499,10 @@ def compute_pair_counts_simple(
     dr.process(data_cat, rand_cat)
 
     # Create 2D arrays assuming uniform mu distribution
-    dd_2d = np.tile(dd.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
-    dr_2d = np.tile(dr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+    dd_counts = dd.weight if hasattr(dd, "weight") else dd.npairs
+    dr_counts = dr.weight if hasattr(dr, "weight") else dr.npairs
+    dd_2d = np.tile(dd_counts[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+    dr_2d = np.tile(dr_counts[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
 
     if skip_rr:
         # Return zeros - caller will substitute precomputed RR
@@ -507,7 +512,8 @@ def compute_pair_counts_simple(
             print("  RR...")
         rr = treecorr.NNCorrelation(**config)
         rr.process(rand_cat)
-        rr_2d = np.tile(rr.npairs[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
+        rr_counts = rr.weight if hasattr(rr, "weight") else rr.npairs
+        rr_2d = np.tile(rr_counts[:, np.newaxis], (1, n_mu_bins)) / n_mu_bins
 
     return PairCounts(
         s_edges=s_edges,

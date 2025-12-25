@@ -46,6 +46,7 @@ from bao_overlap.covariance import (
     StreamingJackknifeCovariance,
 )
 from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth, save_density_field, trilinear_sample
+from bao_overlap.bao_template import bao_template
 from bao_overlap.fitting import fit_wedge
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.hierarchical import infer_beta_blinded
@@ -97,7 +98,7 @@ def _jk_iteration(
     vecs = []
     for b in range(n_bins):
         xi_bin = landy_szalay(counts_by_bin[b])
-        vecs.append(wedge_xi(xi_bin, mu_edges, tangential_bounds))
+        vecs.append(np.mean(xi_bin, axis=1))
     return np.concatenate(vecs)
 
 
@@ -540,6 +541,11 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         xi_data = np.load(xi_wedge_path)
         xi_tangential = xi_data["xi_tangential"]
         xi_radial = xi_data["xi_radial"]
+        if "xi_monopole" in xi_data:
+            xi_monopole = xi_data["xi_monopole"]
+        else:
+            status("  Warning: xi_monopole missing; falling back to tangential wedge for fitting.", output_dir)
+            xi_monopole = xi_tangential
         env_bin_edges = xi_data["E_bin_edges"]
         env_bin_centers = xi_data["E_bin_centers"]
     else:
@@ -568,14 +574,72 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         xi_all = landy_szalay(combined_counts)
         xi_tangential_all = wedge_xi(xi_all, mu_edges, tangential_bounds)
         xi_radial_all = wedge_xi(xi_all, mu_edges, radial_bounds)
+        xi_monopole_all = np.mean(xi_all, axis=1)
 
         xi_tangential = np.zeros((n_bins, len(s_centers)))
         xi_radial = np.zeros((n_bins, len(s_centers)))
+        xi_monopole = np.zeros((n_bins, len(s_centers)))
 
         for b in range(n_bins):
             xi_bin = landy_szalay(counts_by_bin_combined[b])
             xi_tangential[b] = wedge_xi(xi_bin, mu_edges, tangential_bounds)
             xi_radial[b] = wedge_xi(xi_bin, mu_edges, radial_bounds)
+            xi_monopole[b] = np.mean(xi_bin, axis=1)
+
+        data_xyz_all = np.vstack(all_xyz)
+        data_w_all = np.concatenate(all_data_w)
+        valid_mask = env_bins_all >= 0
+        dd_all_valid = compute_pair_counts_simple(
+            data_xyz_all[valid_mask],
+            data_xyz_all[valid_mask],
+            s_edges=s_edges,
+            mu_edges=mu_edges,
+            data_weights=data_w_all[valid_mask],
+            rand_weights=data_w_all[valid_mask],
+            verbose=False,
+        ).dd
+        dd_within = np.sum([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
+        dd_cross = np.zeros_like(dd_within)
+        for i in range(n_bins):
+            mask_i = env_bins_all == i
+            if not np.any(mask_i):
+                continue
+            for j in range(i + 1, n_bins):
+                mask_j = env_bins_all == j
+                if not np.any(mask_j):
+                    continue
+                cross_counts = compute_pair_counts_simple(
+                    data_xyz_all[mask_i],
+                    data_xyz_all[mask_j],
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    data_weights=data_w_all[mask_i],
+                    rand_weights=data_w_all[mask_j],
+                    verbose=False,
+                    skip_rr=True,
+                )
+                dd_cross += cross_counts.dr
+
+        dd_reconstructed = dd_within + dd_cross
+        diff = dd_reconstructed - dd_all_valid
+        abs_diff = np.abs(diff)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel_diff = np.where(dd_all_valid != 0, abs_diff / np.abs(dd_all_valid), 0.0)
+
+        paper_package_dir = Path(__file__).resolve().parents[1] / "paper_package"
+        _ensure_dir(paper_package_dir)
+        normalization_summary = {
+            "dd_all_sum": float(dd_all_valid.sum()),
+            "dd_within_sum": float(dd_within.sum()),
+            "dd_cross_sum": float(dd_cross.sum()),
+            "max_abs_diff": float(np.max(abs_diff)),
+            "mean_abs_diff": float(np.mean(abs_diff)),
+            "max_rel_diff": float(np.max(rel_diff)),
+            "mean_rel_diff": float(np.mean(rel_diff)),
+            "valid_data_count": int(np.sum(valid_mask)),
+        }
+        with open(paper_package_dir / "normalization_checks.json", "w", encoding="utf-8") as handle:
+            json.dump(normalization_summary, handle, indent=2)
 
         dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
         dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
@@ -599,8 +663,10 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             xi_wedge_path,
             xi_tangential=xi_tangential,
             xi_radial=xi_radial,
+            xi_monopole=xi_monopole,
             xi_tangential_all=xi_tangential_all,
             xi_radial_all=xi_radial_all,
+            xi_monopole_all=xi_monopole_all,
             s_centers=s_centers,
             mu_wedge_defs=np.array([
                 tangential_bounds[0],
@@ -815,7 +881,31 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         "omega_b": prereg["fiducial_cosmology"]["omega_b"],
         "h": prereg["fiducial_cosmology"]["h"],
         "n_s": prereg["fiducial_cosmology"]["n_s"],
+        "sigma8": prereg["fiducial_cosmology"]["sigma8"],
     }
+
+    paper_package_dir = Path(__file__).resolve().parents[1] / "paper_package"
+    _ensure_dir(paper_package_dir)
+    template_values = bao_template(
+        s_centers,
+        r_d=template_params["r_d"],
+        sigma_nl=template_params["sigma_nl"],
+        omega_m=template_params["omega_m"],
+        omega_b=template_params["omega_b"],
+        h=template_params["h"],
+        n_s=template_params["n_s"],
+        sigma8=template_params["sigma8"],
+    )
+    with open(paper_package_dir / "template_values.json", "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "s_centers": s_centers.tolist(),
+                "xi_template": template_values.tolist(),
+                "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+            },
+            handle,
+            indent=2,
+        )
 
     status("STAGE 4: BAO fitting per environment bin", output_dir)
     alpha_records = []
@@ -831,7 +921,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         alpha_bounds = fit_cfg.get("alpha_bounds", (0.6, 1.4))
         fit_result = fit_wedge(
             s=s_centers,
-            xi=xi_tangential[b],
+            xi=xi_monopole[b],
             covariance=cov_block,
             fit_range=fit_range,
             nuisance_terms=nuisance_terms,

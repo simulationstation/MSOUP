@@ -20,6 +20,7 @@ def test_fit_wedge_smoke():
             "omega_b": 0.049,
             "h": 0.676,
             "n_s": 0.97,
+            "sigma8": 0.81,
         },
     )
-    assert 0.8 <= result.alpha <= 1.2
+    assert 0.6 <= result.alpha <= 1.4

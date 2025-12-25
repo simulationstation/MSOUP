@@ -207,3 +207,23 @@ This change is made **before inspecting any blinded results** from the full prod
 - **NOT result-driven**: Change made based on optimizer behavior, not α values
 - **No unblinding occurred**: Blinded results remain encrypted
 - **Preregistration compatible**: Optimizer bounds are a numerical detail, not a hypothesis parameter
+
+## Correlation Normalization + Template Observable Fixes (2025-12-25)
+
+### What was wrong
+- Weighted pair counts from TreeCorr were normalized using unweighted pair totals, leading to mis-scaled Landy–Szalay ξ(s,μ) values and inconsistent per-bin amplitudes.
+- The BAO template used an unnormalized power spectrum and did not enforce σ8 amplitude or consistent units, yielding templates orders of magnitude below the data.
+- The fitting compared a monopole template to tangential wedge measurements, causing an observable mismatch.
+
+### What changed
+- TreeCorr pair-count extraction now uses weighted pair sums (`weight`) when available to match weighted Landy–Szalay normalization.
+- BAO template now normalizes the linear power spectrum to σ8, converts r_d to Mpc/h, and outputs ξ(s) at the same observable scale as the data.
+- BAO fitting now uses the monopole ξ(s) while retaining wedge outputs for plotting.
+- Added outputs to `paper_package/normalization_checks.json` and `paper_package/template_values.json`.
+
+### Evidence
+- `paper_package/normalization_checks.json`: reports weighted DD decomposition (within-bin + cross-bin vs total) and summary diffs.
+- `paper_package/template_values.json`: contains ξ_template values at the fitting s-bins with physically reasonable amplitudes.
+
+### Blinding Status
+- **No unblinding occurred**: only normalization/template infrastructure changed; no results were decrypted or inspected.
