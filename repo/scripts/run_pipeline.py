@@ -446,91 +446,97 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
     status("STAGE 2: Computing pair counts by environment bin", output_dir)
 
-    # Check for checkpoint file
-    pair_counts_checkpoint = output_dir / "pair_counts_checkpoint.npz"
-    counts_by_region: Dict[str, Dict[int, Any]] = {r: {} for r in regions}
-    counts_all_regions = []
-
-    if pair_counts_checkpoint.exists():
-        status("  Resuming from pair counts checkpoint...", output_dir)
-        ckpt = np.load(pair_counts_checkpoint, allow_pickle=True)
-        completed_bins = int(ckpt["completed_bins"])
-        status(f"  Found checkpoint with {completed_bins} bins completed", output_dir)
-        # Load completed bins
-        for region in regions:
-            for b in range(completed_bins):
-                counts_by_region[region][b] = PairCounts(
-                    s_edges=s_edges,
-                    mu_edges=mu_edges,
-                    dd=ckpt[f"dd_{region}_{b}"],
-                    dr=ckpt[f"dr_{region}_{b}"],
-                    rr=ckpt[f"rr_{region}_{b}"],
-                    meta={"loaded_from_checkpoint": True},
-                )
-        start_bin = completed_bins
-    else:
-        start_bin = 0
-
-    # Process bins one at a time with memory cleanup
-    import gc
-    for b in range(start_bin, n_bins):
-        status(f"  Processing E-bin {b}/{n_bins-1}...", output_dir)
-        t0 = time.time()
-
-        for region in regions:
-            region_payload = per_region[region]
-            data_mask = region_payload["env_bin"] == b
-
-            if not np.any(data_mask):
-                counts_by_region[region][b] = PairCounts(
-                    s_edges=s_edges, mu_edges=mu_edges,
-                    dd=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                    dr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                    rr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
-                    meta={"n_data": 0},
-                )
-                continue
-
-            counts = compute_pair_counts_simple(
-                region_payload["data_xyz"][data_mask],
-                region_payload["rand_xyz"],
-                s_edges=s_edges,
-                mu_edges=mu_edges,
-                data_weights=region_payload["data"].w[data_mask] if region_payload["data"].w is not None else None,
-                rand_weights=region_payload["randoms"].w,
-                verbose=False,
-            )
-            counts_by_region[region][b] = counts
-            status(f"    {region} bin {b}: {np.sum(data_mask)} galaxies ({time.time()-t0:.1f}s)", output_dir)
-
-        # Save checkpoint after each bin
-        ckpt_data = {"completed_bins": np.array([b + 1])}
-        for region in regions:
-            for bb in range(b + 1):
-                ckpt_data[f"dd_{region}_{bb}"] = counts_by_region[region][bb].dd
-                ckpt_data[f"dr_{region}_{bb}"] = counts_by_region[region][bb].dr
-                ckpt_data[f"rr_{region}_{bb}"] = counts_by_region[region][bb].rr
-        np.savez(pair_counts_checkpoint, **ckpt_data)
-        status(f"  Checkpoint saved (bin {b} done)", output_dir)
-
-        # Memory cleanup
-        gc.collect()
-        try:
-            with open('/proc/meminfo') as f:
-                for line in f:
-                    if line.startswith('MemAvailable:'):
-                        avail = int(line.split()[1]) / 1e6
-                        status(f"  Memory: {avail:.1f} GB available", output_dir)
-                        break
-        except:
-            pass
-
-    # Check if STAGE 2 outputs already exist (resume support)
+    # Check if STAGE 2 outputs already exist (resume support) - MUST CHECK FIRST
     pair_counts_path = output_dir / "pair_counts_by_Ebin.npz"
     xi_wedge_path = output_dir / "xi_wedge_by_Ebin.npz"
+    stage2_complete = pair_counts_path.exists() and xi_wedge_path.exists()
 
-    if pair_counts_path.exists() and xi_wedge_path.exists():
-        status("  STAGE 2 outputs exist - loading saved results", output_dir)
+    if stage2_complete:
+        status("  STAGE 2 outputs exist - skipping to STAGE 3", output_dir)
+
+    # Only run pair counting if not already complete
+    if not stage2_complete:
+        # Check for checkpoint file
+        pair_counts_checkpoint = output_dir / "pair_counts_checkpoint.npz"
+        counts_by_region: Dict[str, Dict[int, Any]] = {r: {} for r in regions}
+        counts_all_regions = []
+
+        if pair_counts_checkpoint.exists():
+            status("  Resuming from pair counts checkpoint...", output_dir)
+            ckpt = np.load(pair_counts_checkpoint, allow_pickle=True)
+            completed_bins = int(ckpt["completed_bins"])
+            status(f"  Found checkpoint with {completed_bins} bins completed", output_dir)
+            # Load completed bins
+            for region in regions:
+                for b in range(completed_bins):
+                    counts_by_region[region][b] = PairCounts(
+                        s_edges=s_edges,
+                        mu_edges=mu_edges,
+                        dd=ckpt[f"dd_{region}_{b}"],
+                        dr=ckpt[f"dr_{region}_{b}"],
+                        rr=ckpt[f"rr_{region}_{b}"],
+                        meta={"loaded_from_checkpoint": True},
+                    )
+            start_bin = completed_bins
+        else:
+            start_bin = 0
+
+        # Process bins one at a time with memory cleanup
+        import gc
+        for b in range(start_bin, n_bins):
+            status(f"  Processing E-bin {b}/{n_bins-1}...", output_dir)
+            t0 = time.time()
+
+            for region in regions:
+                region_payload = per_region[region]
+                data_mask = region_payload["env_bin"] == b
+
+                if not np.any(data_mask):
+                    counts_by_region[region][b] = PairCounts(
+                        s_edges=s_edges, mu_edges=mu_edges,
+                        dd=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                        dr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                        rr=np.zeros((len(s_edges)-1, len(mu_edges)-1)),
+                        meta={"n_data": 0},
+                    )
+                    continue
+
+                counts = compute_pair_counts_simple(
+                    region_payload["data_xyz"][data_mask],
+                    region_payload["rand_xyz"],
+                    s_edges=s_edges,
+                    mu_edges=mu_edges,
+                    data_weights=region_payload["data"].w[data_mask] if region_payload["data"].w is not None else None,
+                    rand_weights=region_payload["randoms"].w,
+                    verbose=False,
+                )
+                counts_by_region[region][b] = counts
+                status(f"    {region} bin {b}: {np.sum(data_mask)} galaxies ({time.time()-t0:.1f}s)", output_dir)
+
+            # Save checkpoint after each bin
+            ckpt_data = {"completed_bins": np.array([b + 1])}
+            for region in regions:
+                for bb in range(b + 1):
+                    ckpt_data[f"dd_{region}_{bb}"] = counts_by_region[region][bb].dd
+                    ckpt_data[f"dr_{region}_{bb}"] = counts_by_region[region][bb].dr
+                    ckpt_data[f"rr_{region}_{bb}"] = counts_by_region[region][bb].rr
+            np.savez(pair_counts_checkpoint, **ckpt_data)
+            status(f"  Checkpoint saved (bin {b} done)", output_dir)
+
+            # Memory cleanup
+            gc.collect()
+            try:
+                with open('/proc/meminfo') as f:
+                    for line in f:
+                        if line.startswith('MemAvailable:'):
+                            avail = int(line.split()[1]) / 1e6
+                            status(f"  Memory: {avail:.1f} GB available", output_dir)
+                            break
+            except:
+                pass
+
+    # Load STAGE 2 results (either just computed or from existing files)
+    if stage2_complete:
         xi_data = np.load(xi_wedge_path)
         xi_tangential = xi_data["xi_tangential"]
         xi_radial = xi_data["xi_radial"]

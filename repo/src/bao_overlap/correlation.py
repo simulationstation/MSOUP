@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - handled via fallback
 
 # Resource limits to prevent system overload
 MAX_MEMORY_GB = float(os.environ.get("BAO_MAX_MEMORY_GB", "8.0"))
-TREECORR_NTHREADS = int(os.environ.get("BAO_NTHREADS", "4"))
+TREECORR_NTHREADS = int(os.environ.get("BAO_NTHREADS", "40"))
 
 
 def _check_memory():

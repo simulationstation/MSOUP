@@ -39,8 +39,8 @@ class PriorConfig:
 class ComputeConfig:
     """Compute and guardrail settings."""
 
-    max_workers: int = 1
-    max_rss_gb: float = 9.0
+    max_workers: int = 12
+    max_rss_gb: float = 200.0
     rss_check_interval: int = 5
     bandwidth: Optional[float] = None
     seed: int = 1_234

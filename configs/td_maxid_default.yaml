@@ -12,8 +12,8 @@ priors:
   mixture_eps: 0.1
   mixture_scale: 6.0
 compute:
-  max_workers: 1
-  max_rss_gb: 9.0
+  max_workers: 12
+  max_rss_gb: 200.0
   rss_check_interval: 5
   bandwidth: null
   seed: 1234

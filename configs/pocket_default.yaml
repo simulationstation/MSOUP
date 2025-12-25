@@ -39,20 +39,20 @@ stats:
   resamples_full_default: 512
   block_length: 128
   random_seed: 13
-  n_processes: 1  # Serial processing to avoid memory duplication
+  n_processes: 12  # 256GB RAM / 20GB per worker = 12 workers
   enforce_determinism: true
   allow_time_shift_null: false
   pair_mode: binned
   time_bin_seconds: 60
-  max_rss_gb: 8.0
+  max_rss_gb: 200.0
   max_candidates_in_memory: 750000
 
 resources:
-  max_workers: 1
+  max_workers: 12
   chunk_days: 7
   resamples_sanity_default: 256
   resamples_full_default: 512
-  max_rss_gb: 8.0
+  max_rss_gb: 200.0
   pair_mode: binned
   time_bin_seconds: 60
   max_candidates_in_memory: 750000

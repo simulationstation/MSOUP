@@ -13,8 +13,8 @@ from joblib import Parallel, delayed
 
 from .density_field import DensityField, line_integral, trilinear_sample
 
-# Number of parallel workers (capped at 20 to limit memory usage)
-N_JOBS = min(20, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
+# Number of parallel workers (capped at 40 for stability)
+N_JOBS = min(40, max(1, int(os.environ.get("BAO_N_JOBS", os.cpu_count() or 4))))
 
 
 @dataclass
@@ -245,7 +245,7 @@ def compute_per_galaxy_mean_e1(
     # Run in parallel with progress reporting
     batch_size = max(1000, n_gal // 100)  # Report every ~1%
 
-    results = Parallel(n_jobs=n_jobs, verbose=0, batch_size="auto")(
+    results = Parallel(n_jobs=n_jobs, verbose=0, batch_size="auto", temp_folder="/tmp")(
         delayed(_process_single_galaxy)(
             idx=idx,
             galaxy_xyz=galaxy_xyz,

@@ -84,20 +84,20 @@ class StatsConfig:
     robustness_null_variants: Optional[list] = None
     pair_mode: str = "binned"
     time_bin_seconds: int = 60
-    max_rss_gb: float = 9.0
+    max_rss_gb: float = 200.0
     max_candidates_in_memory: int = 750000
-    max_workers: int = 1
+    max_workers: int = 12
 
 
 @dataclass
 class ResourceConfig:
     """Execution safety settings."""
 
-    max_workers: int = 1
+    max_workers: int = 12
     chunk_days: float = 7.0
     resamples_sanity_default: int = 128
     resamples_full_default: int = 512
-    max_rss_gb: float = 9.0
+    max_rss_gb: float = 200.0
     pair_mode: str = "binned"
     time_bin_seconds: int = 60
     max_candidates_in_memory: int = 750000

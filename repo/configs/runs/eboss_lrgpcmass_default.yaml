@@ -31,8 +31,8 @@ stages:
 
 # Runtime configuration
 runtime:
-  n_workers: 8
-  dry_run_fraction: 0.01
+  n_workers: 12
+  dry_run_fraction: null
   verbose: true
   checkpoint_interval: 10
 
