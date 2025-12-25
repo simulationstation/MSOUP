@@ -294,6 +294,7 @@ def compute_pair_counts_by_environment(
     mu_edges: np.ndarray,
     data_weights: Optional[np.ndarray] = None,
     rand_weights: Optional[np.ndarray] = None,
+    rand_weights_by_bin: Optional[np.ndarray] = None,
     verbose: bool = True,
     pair_counter: Callable[..., PairCounts] = compute_pair_counts,
     precomputed_rr: Optional[np.ndarray] = None,
@@ -302,8 +303,8 @@ def compute_pair_counts_by_environment(
 
     For environment-binned correlation functions:
     - DD: only data pairs where BOTH galaxies are in bin b
-    - DR: data in bin b paired with ALL randoms (not E-binned)
-    - RR: ALL random pairs (same for all bins, properly normalized)
+    - DR: data in bin b paired with ALL randoms
+    - RR: random pairs weighted for bin b (when rand_weights_by_bin is provided)
 
     This is the standard approach because randoms trace survey geometry,
     not clustering environment. The E-bin assignment for randoms (rand_bins)
@@ -311,30 +312,38 @@ def compute_pair_counts_by_environment(
 
     Parameters
     ----------
+    rand_weights_by_bin : np.ndarray, optional
+        Per-bin random weights with shape (n_bins, n_rand). When provided,
+        RR is computed separately per bin (no shared RR).
     precomputed_rr : np.ndarray, optional
         Pre-computed RR pair counts to reuse (for jackknife efficiency).
         If None, RR is computed from rand_xyz.
     """
     counts_by_bin: Dict[int, PairCounts] = {}
 
-    # Compute RR once using ALL randoms (same for all E-bins)
-    if precomputed_rr is not None:
-        rr_array = precomputed_rr
-        if verbose:
-            print(f"Using precomputed RR (shape {rr_array.shape})")
-    else:
-        if verbose:
-            print(f"Computing RR with all {len(rand_xyz)} randoms (shared across E-bins)")
-        rr_all = pair_counter(
-            rand_xyz,  # dummy for DD slot, will extract only RR
-            rand_xyz,
-            s_edges=s_edges,
-            mu_edges=mu_edges,
-            data_weights=rand_weights,
-            rand_weights=rand_weights,
-            verbose=False,
-        )
-        rr_array = rr_all.rr
+    if rand_weights_by_bin is not None and precomputed_rr is not None:
+        raise ValueError("precomputed_rr cannot be used with per-bin random weights.")
+
+    rr_array = None
+    if rand_weights_by_bin is None:
+        # Compute RR once using ALL randoms (same for all E-bins)
+        if precomputed_rr is not None:
+            rr_array = precomputed_rr
+            if verbose:
+                print(f"Using precomputed RR (shape {rr_array.shape})")
+        else:
+            if verbose:
+                print(f"Computing RR with all {len(rand_xyz)} randoms (shared across E-bins)")
+            rr_all = pair_counter(
+                rand_xyz,  # dummy for DD slot, will extract only RR
+                rand_xyz,
+                s_edges=s_edges,
+                mu_edges=mu_edges,
+                data_weights=rand_weights,
+                rand_weights=rand_weights,
+                verbose=False,
+            )
+            rr_array = rr_all.rr
 
     for b in range(n_bins):
         data_mask = data_bins == b
@@ -344,9 +353,15 @@ def compute_pair_counts_by_environment(
 
         # DD: data in bin b only
         # DR: data in bin b × ALL randoms
-        # RR: ALL randoms (computed once above or precomputed)
+        # RR: ALL randoms (shared) or bin-weighted randoms when requested
         if verbose:
             print(f"E-bin {b}: {np.sum(data_mask)} data galaxies")
+
+        rand_weights_b = rand_weights
+        skip_rr = rand_weights_by_bin is None and precomputed_rr is not None
+        if rand_weights_by_bin is not None:
+            rand_weights_b = rand_weights_by_bin[b]
+            skip_rr = False
 
         counts = pair_counter(
             data_xyz[data_mask],
@@ -354,27 +369,24 @@ def compute_pair_counts_by_environment(
             s_edges=s_edges,
             mu_edges=mu_edges,
             data_weights=None if data_weights is None else data_weights[data_mask],
-            rand_weights=rand_weights,  # ALL random weights
+            rand_weights=rand_weights_b,
             verbose=verbose,
-            skip_rr=(precomputed_rr is not None),  # Skip RR if we have precomputed
+            skip_rr=skip_rr,
         )
 
-        # Replace RR with the shared RR from all randoms
-        # Update metadata to reflect that RR uses all randoms
-        updated_meta = dict(counts.meta)
-        # For proper Landy-Szalay normalization with shared RR:
-        # - DD normalization uses sum_w_data (data in this bin)
-        # - DR normalization uses sum_w_data * sum_w_rand (data in bin × all randoms)
-        # - RR normalization uses sum_w_rand (all randoms) - already correct
-        # The metadata from counts already has correct sum_w_rand (all randoms passed)
-        counts_by_bin[b] = PairCounts(
-            s_edges=counts.s_edges,
-            mu_edges=counts.mu_edges,
-            dd=counts.dd,
-            dr=counts.dr,
-            rr=rr_array,  # Use shared RR
-            meta=updated_meta,
-        )
+        if rand_weights_by_bin is None and rr_array is not None:
+            # Replace RR with the shared RR from all randoms
+            updated_meta = dict(counts.meta)
+            counts_by_bin[b] = PairCounts(
+                s_edges=counts.s_edges,
+                mu_edges=counts.mu_edges,
+                dd=counts.dd,
+                dr=counts.dr,
+                rr=rr_array,
+                meta=updated_meta,
+            )
+        else:
+            counts_by_bin[b] = counts
     return counts_by_bin
 
 

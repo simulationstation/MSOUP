@@ -54,6 +54,12 @@ from bao_overlap.io import load_catalog, load_yaml, save_metadata
 from bao_overlap.overlap_metric import compute_per_galaxy_mean_e1, normalize
 from bao_overlap.prereg import load_prereg
 from bao_overlap.reporting import scan_forbidden_keys_in_dir, write_methods_snapshot
+from bao_overlap.selection import (
+    apply_f_b_weights,
+    build_f_b_grid,
+    compute_cell_keys,
+    compute_selection_function_f_b,
+)
 
 
 def _ensure_dir(path: Path) -> None:
@@ -68,17 +74,26 @@ def _jk_iteration(
     rand_bin_all: np.ndarray,
     data_w_all: np.ndarray,
     rand_w_all: np.ndarray,
+    rand_cell_keys_all: np.ndarray,
+    f_b_grid: np.ndarray,
     jk_data_regions: np.ndarray,
     jk_rand_regions: np.ndarray,
     n_bins: int,
     s_edges: np.ndarray,
     mu_edges: np.ndarray,
     tangential_bounds: tuple,
-    precomputed_rr: np.ndarray,
 ) -> np.ndarray:
     """Compute xi wedge vector for a single JK iteration (for parallel execution)."""
     data_mask = jk_data_regions != idx
     rand_mask = jk_rand_regions != idx
+    rand_cell_keys = rand_cell_keys_all[rand_mask]
+
+    rand_weights_by_bin = np.vstack(
+        [
+            apply_f_b_weights(rand_w_all[rand_mask], rand_cell_keys, f_b_grid, b)
+            for b in range(n_bins)
+        ]
+    )
 
     counts_by_bin = compute_pair_counts_by_environment(
         data_xyz_all[data_mask],
@@ -90,9 +105,10 @@ def _jk_iteration(
         mu_edges=mu_edges,
         data_weights=data_w_all[data_mask],
         rand_weights=rand_w_all[rand_mask],
+        rand_weights_by_bin=rand_weights_by_bin,
         verbose=False,
         pair_counter=compute_pair_counts_simple,
-        precomputed_rr=precomputed_rr,
+        precomputed_rr=None,
     )
 
     vecs = []
@@ -120,6 +136,10 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     (output_dir / "prereg_hash.txt").write_text(prereg_hash, encoding="utf-8")
 
     dry_run_fraction = cfg.get("runtime", {}).get("dry_run_fraction") if dry_run else None
+    validation_mode = bool(
+        cfg.get("runtime", {}).get("validation_mode", False)
+        or os.environ.get("BAO_VALIDATION_MODE", "").lower() in {"1", "true", "yes"}
+    )
     regions = prereg["primary_dataset"]["regions"]
 
     cosmo_cfg = prereg["fiducial_cosmology"]
@@ -207,6 +227,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 seed=seed,
             )
             status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
+            data_w = data_cat.w if data_cat.w is not None else np.ones(len(data_cat.ra))
+            rand_w = rand_cat.w if rand_cat.w is not None else np.ones(len(rand_cat.ra))
             geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
             data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
             rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
@@ -243,6 +265,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 "env_bin": env_bin,
                 "rand_local": rand_local,
                 "rand_bin": rand_bin,
+                "data_w": data_w,
+                "rand_w": rand_w,
             }
             all_env_raw.append(env_raw)
             all_ra.append(data_cat.ra)
@@ -251,8 +275,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             all_region.append(np.full(len(data_cat.ra), region))
             all_xyz.append(data_xyz)
             all_rand_xyz.append(rand_xyz)
-            all_data_w.append(data_cat.w)
-            all_rand_w.append(rand_cat.w)
+            all_data_w.append(data_w)
+            all_rand_w.append(rand_w)
             offset += n_reg
 
         env_raw_all = np.concatenate(all_env_raw)
@@ -272,6 +296,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 seed=seed,
             )
             status(f"  {region}: {len(data_cat.ra)} data, {len(rand_cat.ra)} randoms", output_dir)
+            data_w = data_cat.w if data_cat.w is not None else np.ones(len(data_cat.ra))
+            rand_w = rand_cat.w if rand_cat.w is not None else np.ones(len(rand_cat.ra))
             geom_cosmo = {"omega_m": cosmo_cfg["omega_m"], "h": cosmo_cfg["h"]}
             data_xyz = radec_to_cartesian(data_cat.ra, data_cat.dec, data_cat.z, **geom_cosmo)
             rand_xyz = radec_to_cartesian(rand_cat.ra, rand_cat.dec, rand_cat.z, **geom_cosmo)
@@ -332,6 +358,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 "env_raw": env_raw,
                 "env_meta": env_meta,
                 "rand_local": rand_local,
+                "data_w": data_w,
+                "rand_w": rand_w,
             }
             all_env_raw.append(env_raw)
             all_ra.append(data_cat.ra)
@@ -340,8 +368,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             all_region.append(np.full(len(data_cat.ra), region))
             all_xyz.append(data_xyz)
             all_rand_xyz.append(rand_xyz)
-            all_data_w.append(data_cat.w)
-            all_rand_w.append(rand_cat.w)
+            all_data_w.append(data_w)
+            all_rand_w.append(rand_w)
 
         env_raw_all = np.concatenate(all_env_raw)
         valid_mask = np.isfinite(env_raw_all)
@@ -388,6 +416,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             z=np.concatenate(all_z),
             ra=np.concatenate(all_ra),
             dec=np.concatenate(all_dec),
+            weight=np.concatenate(all_data_w),
             E1_raw=env_raw_all,
             E1_value=env_norm_all,
             E_bin=env_bins_all,
@@ -418,6 +447,60 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
             }
     with open(output_dir / "environment_assignment_diagnostics.json", "w", encoding="utf-8") as handle:
         json.dump(env_diag, handle, indent=2)
+
+    status("  Building selection function f_b(theta, z)...", output_dir)
+    selection_path = output_dir / "selection_function_f_b.npz"
+    if selection_path.exists():
+        selection = np.load(selection_path)
+        pixel_ids = selection["pixel_ids"]
+        zbin_ids = selection["zbin_ids"]
+        f_b = selection["f_b"]
+        n_all = selection["n_all"]
+        z_edges = selection["z_edges"]
+        nside = int(np.atleast_1d(selection["nside"])[0])
+    else:
+        if resume_from_e1 and "weight" in saved_e1:
+            data_weights_all = saved_e1["weight"]
+        else:
+            data_weights_all = np.concatenate(all_data_w)
+        selection = compute_selection_function_f_b(
+            ra=np.concatenate(all_ra),
+            dec=np.concatenate(all_dec),
+            z=np.concatenate(all_z),
+            e_bin=env_bins_all,
+            weights=data_weights_all,
+            n_bins=n_bins,
+            nside=32,
+            dz=0.05,
+            z_min=0.6,
+            z_max=1.0,
+        )
+        pixel_ids = selection["pixel_ids"]
+        zbin_ids = selection["zbin_ids"]
+        f_b = selection["f_b"]
+        n_all = selection["n_all"]
+        z_edges = selection["z_edges"]
+        nside = int(selection["nside"])
+        np.savez(
+            selection_path,
+            pixel_ids=pixel_ids,
+            zbin_ids=zbin_ids,
+            f_b=f_b,
+            n_all=n_all,
+            z_edges=z_edges,
+            nside=np.array([nside], dtype=int),
+        )
+
+    f_b_grid, _ = build_f_b_grid(pixel_ids, zbin_ids, f_b, nside, z_edges)
+    for region in regions:
+        rand_cat = per_region[region]["randoms"]
+        per_region[region]["rand_cell_keys"] = compute_cell_keys(
+            rand_cat.ra,
+            rand_cat.dec,
+            rand_cat.z,
+            nside=nside,
+            z_edges=z_edges,
+        )
 
     # Aggressive memory cleanup before pair counts
     status("  Memory cleanup before pair counts...", output_dir)
@@ -507,8 +590,13 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                     region_payload["rand_xyz"],
                     s_edges=s_edges,
                     mu_edges=mu_edges,
-                    data_weights=region_payload["data"].w[data_mask] if region_payload["data"].w is not None else None,
-                    rand_weights=region_payload["randoms"].w,
+                    data_weights=region_payload["data_w"][data_mask],
+                    rand_weights=apply_f_b_weights(
+                        region_payload["rand_w"],
+                        region_payload["rand_cell_keys"],
+                        f_b_grid,
+                        b,
+                    ),
                     verbose=False,
                 )
                 counts_by_region[region][b] = counts
@@ -559,8 +647,8 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                     region_payload["rand_xyz"],
                     s_edges=s_edges,
                     mu_edges=mu_edges,
-                    data_weights=region_payload["data"].w,
-                    rand_weights=region_payload["randoms"].w,
+                    data_weights=region_payload["data_w"],
+                    rand_weights=region_payload["rand_w"],
                     verbose=False,
                 )
             )
@@ -641,6 +729,93 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         with open(paper_package_dir / "normalization_checks.json", "w", encoding="utf-8") as handle:
             json.dump(normalization_summary, handle, indent=2)
 
+        large_s_target = 177.5
+        large_s_idx = int(np.argmin(np.abs(s_centers - large_s_target)))
+        large_s_center = float(s_centers[large_s_idx])
+
+        def _drn_rrn_stats(counts: PairCounts) -> Dict[str, float]:
+            sum_w_data = counts.meta.get("sum_w_data", 0.0)
+            sum_w_rand = counts.meta.get("sum_w_rand", 0.0)
+            sum_w_data_sq = counts.meta.get("sum_w_data_sq", sum_w_data)
+            sum_w_rand_sq = counts.meta.get("sum_w_rand_sq", sum_w_rand)
+            norm_rr = max((sum_w_rand**2 - sum_w_rand_sq) / 2.0, 1.0)
+            norm_dr = max(sum_w_data * sum_w_rand, 1.0)
+            dr_norm = counts.dr[large_s_idx] / norm_dr
+            rr_norm = counts.rr[large_s_idx] / norm_rr
+            ratio = np.where(rr_norm > 0, dr_norm / rr_norm, 0.0)
+            return {
+                "median": float(np.median(ratio)),
+                "mean": float(np.mean(ratio)),
+                "median_abs_diff": float(np.median(np.abs(ratio - 1.0))),
+            }
+
+        normalization_checks_by_bin = {
+            "s_target": large_s_target,
+            "s_center": large_s_center,
+            "bins": {},
+        }
+        failed_bins = []
+        for b in range(n_bins):
+            counts = counts_by_bin_combined[b]
+            stats = _drn_rrn_stats(counts)
+            if stats["median_abs_diff"] > 0.05:
+                failed_bins.append(b)
+            normalization_checks_by_bin["bins"][str(b)] = {
+                "sum_wD_bin": float(counts.meta.get("sum_w_data", 0.0)),
+                "sum_wR_b": float(counts.meta.get("sum_w_rand", 0.0)),
+                "N_DD_bin": float(np.sum(counts.dd)),
+                "N_DR_bin": float(np.sum(counts.dr)),
+                "N_RR_b": float(np.sum(counts.rr)),
+                "DRn_over_RRn_median": stats["median"],
+                "DRn_over_RRn_mean": stats["mean"],
+                "median_abs_DRn_over_RRn_minus_1": stats["median_abs_diff"],
+            }
+
+        validation_status = "FAIL" if failed_bins else "PASS"
+        normalization_checks_by_bin["validation"] = {
+            "mode": validation_mode,
+            "status": validation_status,
+            "threshold": 0.05,
+            "failed_bins": failed_bins,
+        }
+
+        with open(paper_package_dir / "normalization_checks_by_bin.json", "w", encoding="utf-8") as handle:
+            json.dump(normalization_checks_by_bin, handle, indent=2)
+
+        s_targets = [102.5, 177.5]
+        s_indices = [int(np.argmin(np.abs(s_centers - target))) for target in s_targets]
+        s_centers_actual = [float(s_centers[idx]) for idx in s_indices]
+        xi_report = {
+            "s_targets": s_targets,
+            "s_indices": s_indices,
+            "s_centers": s_centers_actual,
+            "xi_all": {
+                str(target): float(xi_monopole_all[idx])
+                for target, idx in zip(s_targets, s_indices)
+            },
+            "xi_by_bin": {},
+            "drn_over_rrn_by_bin": {
+                str(b): normalization_checks_by_bin["bins"][str(b)][
+                    "DRn_over_RRn_median"
+                ]
+                for b in range(n_bins)
+            },
+        }
+        for b in range(n_bins):
+            xi_report["xi_by_bin"][str(b)] = {
+                str(target): float(xi_monopole[b][idx])
+                for target, idx in zip(s_targets, s_indices)
+            }
+
+        with open(paper_package_dir / "report_per_bin_xi_sanity.json", "w", encoding="utf-8") as handle:
+            json.dump(xi_report, handle, indent=2)
+
+        if validation_mode and failed_bins:
+            raise RuntimeError(
+                "Validation FAIL: median |DRn/RRn - 1| exceeds 0.05 for bins "
+                f"{failed_bins} at s={large_s_center:.1f}."
+            )
+
         dd_combined = np.stack([counts_by_bin_combined[b].dd for b in range(n_bins)], axis=0)
         dr_combined = np.stack([counts_by_bin_combined[b].dr for b in range(n_bins)], axis=0)
         rr_combined = np.stack([counts_by_bin_combined[b].rr for b in range(n_bins)], axis=0)
@@ -711,6 +886,7 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
         rand_w_all = np.concatenate(all_rand_w)
         env_bin_all = env_bins_all
         rand_bin_all = np.concatenate([per_region[r]["rand_bin"] for r in regions])
+        rand_cell_keys_all = np.concatenate([per_region[r]["rand_cell_keys"] for r in regions])
 
         jk_data_regions = assign_jackknife_regions(
             data_ra_all,
@@ -729,29 +905,6 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
 
         n_jk = jk_cfg["n_regions"]
         status(f"  Jackknife loop: {n_jk} regions", output_dir)
-
-        # Precompute RR once with all randoms (approximation for JK efficiency)
-        # The leave-one-out RR variation is small (~1%) and negligible for covariance
-        rr_checkpoint_path = output_dir / "rr_precomputed.npy"
-
-        if rr_checkpoint_path.exists():
-            status("  Loading precomputed RR from checkpoint...", output_dir)
-            precomputed_rr = np.load(rr_checkpoint_path)
-            status(f"  RR loaded (shape {precomputed_rr.shape})", output_dir)
-        else:
-            status("  Precomputing RR with all randoms...", output_dir)
-            rr_precompute = compute_pair_counts_simple(
-                rand_xyz_all,
-                rand_xyz_all,
-                s_edges=s_edges,
-                mu_edges=mu_edges,
-                data_weights=rand_w_all,
-                rand_weights=rand_w_all,
-                verbose=False,
-            )
-            precomputed_rr = rr_precompute.rr
-            np.save(rr_checkpoint_path, precomputed_rr)
-            status(f"  RR precomputed and saved (shape {precomputed_rr.shape})", output_dir)
 
         # --- MEMORY FIX: Use streaming covariance instead of storing all JK vectors ---
         # Previous code stored jk_vectors list that grew each iteration.
@@ -824,13 +977,14 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                     rand_bin_all=rand_bin_all,
                     data_w_all=data_w_all,
                     rand_w_all=rand_w_all,
+                    rand_cell_keys_all=rand_cell_keys_all,
+                    f_b_grid=f_b_grid,
                     jk_data_regions=jk_data_regions,
                     jk_rand_regions=jk_rand_regions,
                     n_bins=n_bins,
                     s_edges=s_edges,
                     mu_edges=mu_edges,
                     tangential_bounds=tangential_bounds,
-                    precomputed_rr=precomputed_rr,
                 )
                 for idx in batch_indices
             )
