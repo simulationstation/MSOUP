@@ -266,3 +266,18 @@ TreeCorr is not available in this environment, so the requested validation runs 
 **ALL-sample xi sanity (requested, small sample):**
 - Command: `PYTHONPATH=src python - <<'PY' ... PY`
 - Result: **FAILED** (RuntimeError: TreeCorr is required to compute xi(s, mu))
+
+## Fit-range Enforcement + Low-s Exclusion Test (2025-02-28)
+
+### What changed
+- Enforced fit-range binning by asserting the effective fit s-min derived from bin centers is not below the preregistered fit s-min.
+- Persisted `fit_s_min`, `fit_s_max`, and `n_fit_bins` alongside `fit_range` in `alpha_by_Ebin.json`.
+- Added unit test `tests/test_fit_range_excludes_low_s.py` to confirm low-s data changes do not affect alpha when excluded by fit range.
+
+### Pytest run (this environment)
+- Command: `PYTHONPATH=src pytest -q tests/test_fit_range_excludes_low_s.py`
+- Output:
+```
+.                                                                        [100%]
+1 passed in 3.55s
+```

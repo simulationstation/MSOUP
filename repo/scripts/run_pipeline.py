@@ -147,6 +147,13 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     s_edges = np.arange(corr_cfg["s_min"], corr_cfg["s_max"] + corr_cfg["s_bin"], corr_cfg["s_bin"])
     mu_edges = np.arange(corr_cfg["mu_min"], corr_cfg["mu_max"] + corr_cfg["mu_bin"], corr_cfg["mu_bin"])
     s_centers = 0.5 * (s_edges[:-1] + s_edges[1:])
+    fit_mask = (s_centers >= fit_range[0]) & (s_centers <= fit_range[1])
+    if not np.any(fit_mask):
+        raise ValueError("Fit range excludes all s bins; check preregistration fit_range.")
+    fit_s_min = float(np.min(s_centers[fit_mask]))
+    fit_s_max = float(np.max(s_centers[fit_mask]))
+    n_fit_bins = int(np.sum(fit_mask))
+    assert fit_s_min >= fit_range[0], "Fit range lower bound falls below preregistration s_min."
 
     wedge_cfg = prereg["correlation"]["wedges"]
     tangential_bounds = parse_wedge_bounds(wedge_cfg["tangential"])
@@ -966,6 +973,9 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                 "bin_edges": env_bin_edges.tolist(),
                 "bin_centers": env_bin_centers.tolist(),
                 "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                "fit_s_min": fit_s_min,
+                "fit_s_max": fit_s_max,
+                "n_fit_bins": n_fit_bins,
                 "template": fit_cfg["template"],
                 "nuisance": fit_cfg["nuisance"],
             },
