@@ -44,7 +44,7 @@ from bao_overlap.covariance import (
 from bao_overlap.density_field import build_density_field, build_grid_spec, gaussian_smooth, save_density_field, trilinear_sample
 from bao_overlap.bao_template import bao_template
 from bao_overlap.fitting import fit_wedge
-from bao_overlap.diagnostic_bao import fit_wedge_diagnostic
+from bao_overlap.diagnostic_bao import FitFailure, fit_wedge_diagnostic, fit_wiggle_only_monopole
 from bao_overlap.geometry import radec_to_cartesian
 from bao_overlap.hierarchical import infer_beta_blinded
 from bao_overlap.io import load_catalog, load_yaml, save_metadata
@@ -862,6 +862,15 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
     diagnostic_enabled = bool(diagnostic_cfg.get("enabled", False))
     diagnostic_alpha_points = int(diagnostic_cfg.get("alpha_scan_points", 41))
     diagnostic_sigma_bounds = tuple(diagnostic_cfg.get("sigma_nl_bounds", (0.0, 15.0)))
+    wiggle_cfg = cfg.get("diagnostic_wiggle_only", {})
+    wiggle_enabled = bool(wiggle_cfg.get("enabled", False))
+    wiggle_alpha_points = int(wiggle_cfg.get("alpha_scan_points", 41))
+    wiggle_sigma_bounds = wiggle_cfg.get("sigma_nl_bounds")
+    wiggle_sigma_bounds = (
+        tuple(wiggle_sigma_bounds)
+        if wiggle_sigma_bounds is not None
+        else None
+    )
     alpha_records = []
     alpha_values = []
     alpha_sigmas = []
@@ -958,6 +967,73 @@ def run_pipeline(config_path: Path, dry_run: bool = False) -> None:
                         "enabled": diagnostic_enabled,
                         "alpha_scan_points": diagnostic_alpha_points,
                         "sigma_nl_bounds": list(diagnostic_sigma_bounds),
+                        "multipoles": ["xi0"],
+                    },
+                },
+                handle,
+                indent=2,
+            )
+
+    if wiggle_enabled:
+        status("  Diagnostic mode enabled: wiggle-only monopole fit.", output_dir)
+        wiggle_records = []
+        alpha_boundary_hits = []
+        for b in range(n_bins):
+            status(f"  [Wiggle-only] Fitting bin {b+1}/{n_bins}...", output_dir)
+            idx_start = b * len(s_centers)
+            idx_end = (b + 1) * len(s_centers)
+            cov_block = cov_result.covariance[idx_start:idx_end, idx_start:idx_end]
+            alpha_bounds = fit_cfg.get("alpha_bounds", (0.6, 1.4))
+            wiggle_fit = fit_wiggle_only_monopole(
+                s=s_centers,
+                xi=xi_monopole[b],
+                covariance=cov_block,
+                fit_range=fit_range,
+                template_params=template_params,
+                alpha_bounds=alpha_bounds,
+                alpha_scan_points=wiggle_alpha_points,
+                sigma_nl_bounds=wiggle_sigma_bounds,
+                optimizer=fit_cfg["optimizer"],
+            )
+            alpha_boundary_hits.append(wiggle_fit.alpha_hit_bounds)
+            wiggle_records.append(
+                {
+                    "bin": b,
+                    "alpha_hat": wiggle_fit.alpha,
+                    "sigma_nl_hat": wiggle_fit.sigma_nl,
+                    "chi2": wiggle_fit.chi2,
+                    "dof": wiggle_fit.dof,
+                    "chi2_per_dof": wiggle_fit.chi2 / max(wiggle_fit.dof, 1),
+                    "alpha_hit_bounds": wiggle_fit.alpha_hit_bounds,
+                    "sigma_nl_hit_bounds": wiggle_fit.sigma_nl_hit_bounds,
+                    "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                    "alpha_bounds": list(alpha_bounds),
+                    "sigma_nl_bounds": list(wiggle_sigma_bounds) if wiggle_sigma_bounds else None,
+                    "template_params": template_params,
+                    "optimizer": fit_cfg["optimizer"],
+                    "diagnostic_meta": wiggle_fit.meta,
+                }
+            )
+
+        if alpha_boundary_hits and all(alpha_boundary_hits):
+            raise FitFailure(
+                "Wiggle-only diagnostic fit collapsed to alpha boundaries in all bins."
+            )
+
+        wiggle_path = output_dir / "alpha_by_Ebin_wiggle_only.json"
+        with open(wiggle_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "bins": wiggle_records,
+                    "bin_edges": env_bin_edges.tolist(),
+                    "bin_centers": env_bin_centers.tolist(),
+                    "fit_range": {"s_min": fit_range[0], "s_max": fit_range[1]},
+                    "template": "wiggle_only_monopole",
+                    "broadband": "poly2",
+                    "diagnostic_wiggle_only": {
+                        "enabled": wiggle_enabled,
+                        "alpha_scan_points": wiggle_alpha_points,
+                        "sigma_nl_bounds": list(wiggle_sigma_bounds) if wiggle_sigma_bounds else None,
                         "multipoles": ["xi0"],
                     },
                 },
