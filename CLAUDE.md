@@ -16,6 +16,8 @@
 
 7. **Check Python tabbing paradigm BEFORE editing** - Before editing any Python file, examine the existing code to determine whether it uses tabs or spaces (and how many spaces). Match the existing style exactly.
 
+8. **Scientific calculation scripts must not timeout** - All scripts that perform scientific calculations (pair counting, correlation functions, jackknife iterations, etc.) must be written to run without timing out. Use `nohup` for long-running processes and avoid setting timeouts on computationally intensive operations.
+
 ## Globus Data Transfer Setup
 
 To download SDSS data via Globus:
