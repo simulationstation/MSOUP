@@ -25,6 +25,24 @@
    ```
    Then check status with `ps aux | grep script.py` or `tail -f output.log`.
 
+10. **ALWAYS build progress/status into long-running scripts** - Print progress indicators so you can monitor:
+    ```python
+    for i, item in enumerate(items):
+        if i % 10 == 0:
+            print(f"Processing {i}/{len(items)} ({100*i/len(items):.1f}%)", flush=True)
+    ```
+
+11. **ALWAYS parallelize computational tasks** - Use `multiprocessing.Pool` or similar to parallelize:
+    - Monte Carlo trials (each trial is independent)
+    - Processing multiple files/streams
+    - Any loop where iterations are independent
+    Example:
+    ```python
+    from multiprocessing import Pool, cpu_count
+    with Pool(cpu_count()) as p:
+        results = p.map(process_func, items)
+    ```
+
 ## Globus Data Transfer Setup
 
 To download SDSS data via Globus:
