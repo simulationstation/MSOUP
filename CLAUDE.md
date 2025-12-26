@@ -18,6 +18,13 @@
 
 8. **Scientific calculation scripts must not timeout** - All scripts that perform scientific calculations (pair counting, correlation functions, jackknife iterations, etc.) must be written to run without timing out. Use `nohup` for long-running processes and avoid setting timeouts on computationally intensive operations.
 
+9. **NEVER set timeouts on simulations/analysis scripts** - When running Monte Carlo simulations, analyses, or any computational work, NEVER pass a timeout parameter to Bash. Always run with `nohup` so the process survives session disconnection:
+   ```bash
+   nohup python3 script.py > output.log 2>&1 &
+   echo $!  # Save PID to check status later
+   ```
+   Then check status with `ps aux | grep script.py` or `tail -f output.log`.
+
 ## Globus Data Transfer Setup
 
 To download SDSS data via Globus:

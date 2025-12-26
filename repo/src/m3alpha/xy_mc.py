@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Dict, List
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -71,22 +73,67 @@ def _run_single_temperature(l_size: int, temperature: float, config: MCConfig, r
     return float(np.mean(measurements))
 
 
+def _worker(args: Tuple[int, int, float, int, int, int, float, int]) -> Tuple[int, int, float, float]:
+    """Worker function for parallel execution."""
+    l_size, temp_idx, temperature, therm_sweeps, meas_sweeps, stride, width, seed = args
+    rng = np.random.default_rng(seed)
+    theta = rng.uniform(0.0, 2.0 * math.pi, size=(l_size, l_size))
+
+    for _ in range(therm_sweeps):
+        _metropolis_sweep(theta, temperature, width, rng)
+
+    measurements: List[float] = []
+    for sweep in range(meas_sweeps):
+        _metropolis_sweep(theta, temperature, width, rng)
+        if sweep % stride == 0:
+            measurements.append(helicity_modulus(theta, temperature))
+
+    hel = float(np.mean(measurements))
+    return l_size, temp_idx, temperature, hel
+
+
 def run_mc(config: MCConfig) -> MCResult:
     rng = np.random.default_rng(config.seed)
     helicity: Dict[int, np.ndarray] = {}
     alpha_eff: Dict[int, np.ndarray] = {}
 
     temps = np.array(config.temperatures, dtype=float)
+
+    # Build work items for parallel execution
+    work_items = []
     for l_size in config.lattice_sizes:
-        hel_values = np.zeros_like(temps)
-        alpha_values = np.zeros_like(temps)
         for idx, temp in enumerate(temps):
-            hel = _run_single_temperature(l_size, float(temp), config, rng)
-            k_r = k_from_helicity(hel, float(temp))
-            hel_values[idx] = hel
-            alpha_values[idx] = alpha_eff_from_k(k_r)
-        helicity[l_size] = hel_values
-        alpha_eff[l_size] = alpha_values
+            # Generate unique seed for each (L, T) pair
+            seed = rng.integers(0, 2**31)
+            work_items.append((
+                l_size, idx, float(temp),
+                config.thermalization_sweeps,
+                config.measurement_sweeps,
+                config.sweep_stride,
+                config.proposal_width,
+                seed
+            ))
+
+    # Initialize storage
+    for l_size in config.lattice_sizes:
+        helicity[l_size] = np.zeros(len(temps))
+        alpha_eff[l_size] = np.zeros(len(temps))
+
+    # Run in parallel
+    n_workers = min(os.cpu_count() or 4, len(work_items))
+    print(f"Running {len(work_items)} MC simulations on {n_workers} workers...")
+
+    completed = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_worker, item): item for item in work_items}
+        for future in as_completed(futures):
+            l_size, temp_idx, temperature, hel = future.result()
+            k_r = k_from_helicity(hel, temperature)
+            helicity[l_size][temp_idx] = hel
+            alpha_eff[l_size][temp_idx] = alpha_eff_from_k(k_r)
+            completed += 1
+            if completed % 10 == 0 or completed == len(work_items):
+                print(f"  Progress: {completed}/{len(work_items)}")
 
     return MCResult(
         lattice_sizes=config.lattice_sizes,
