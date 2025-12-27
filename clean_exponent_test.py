@@ -12,6 +12,10 @@ from dataclasses import dataclass, replace
 from typing import Tuple, List, Dict
 import csv
 import time
+import os
+import multiprocessing
+import contextlib
+import functools
 
 
 def wrap_angle(angle: float) -> float:
@@ -571,6 +575,94 @@ def run_main_sweep_point(args):
     }
 
 
+def run_epsilon_job(eps: float, feasible_kappas: List[float], fixed_delta: float = None,
+                    params: SimulationParams = None, base_seed: int = 0, idx: int = 0,
+                    kappa_stats: Dict[float, Dict[str, float]] = None,
+                    cal_burnin: int = 200, cal_sample: int = 600,
+                    log_dir: str = "logs") -> Dict[str, float]:
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"eps_{idx}_{eps:.2f}.log")
+
+    seed_cal_geo = base_seed + 1000 * idx + 11
+    seed_cal_neu = base_seed + 1000 * idx + 23
+    seed_final = base_seed + 1000 * idx + 37
+
+    with open(log_path, "w", encoding="utf-8") as log_file, \
+            contextlib.redirect_stdout(log_file), \
+            contextlib.redirect_stderr(log_file):
+        print(f"ε job idx={idx} target={eps:.4f}")
+        print(f"Seeds: cal_geo={seed_cal_geo}, cal_neu={seed_cal_neu}, final={seed_final}")
+        print(f"Feasible κ list: {feasible_kappas}")
+
+        chosen = None
+        for kappa in feasible_kappas:
+            params_k = replace(params, kappa=kappa)
+            stats = kappa_stats[kappa]
+            if fixed_delta is None:
+                delta, ok_delta = calibrate_delta(params_k, target_p=eps,
+                                                  median_q=stats['median_q_level'],
+                                                  n_burnin=cal_burnin, n_sample=cal_sample,
+                                                  seed_base=seed_cal_geo)
+            else:
+                delta = fixed_delta
+                ok_delta = True
+
+            if not ok_delta:
+                continue
+
+            m_tol, ok_m = calibrate_m_tol(params_k, delta, target_p=eps,
+                                          n_burnin=cal_burnin, n_sample=cal_sample,
+                                          seed_base=seed_cal_neu)
+            if ok_m:
+                chosen = (kappa, delta, m_tol)
+                break
+
+        if chosen is None:
+            raise RuntimeError(f"Failed to find feasible κ for ε={eps:.2f}.")
+
+        kappa, delta, m_tol = chosen
+        print(f"Selected κ={kappa:.1f}, δ={delta:.4f}, m_tol={m_tol:.4f}")
+        params_final = replace(params, kappa=kappa)
+        measurement = run_main_sweep_point((params_final, delta, m_tol, seed_final))
+
+    return {
+        'epsilon_target': eps,
+        'kappa': kappa,
+        'delta': delta,
+        'm_tol': m_tol,
+        'p_geo': measurement['p_geo'],
+        'p_neu': measurement['p_neu'],
+        'p_both': measurement['p_both'],
+        'rho': measurement['rho'],
+        'stderr_geo': measurement['stderr_geo'],
+        'stderr_neu': measurement['stderr_neu'],
+        'stderr_both': measurement['stderr_both'],
+        'stderr_rho': measurement['stderr_rho'],
+        'accept_spin': measurement['accept_spin'],
+        'accept_theta': measurement['accept_theta'],
+        'mean_abs_phi': measurement['mean_phi'],
+        'mean_m': measurement['mean_m'],
+        'q95_median': kappa_stats[kappa]['median_q_level'],
+        'q99_median': kappa_stats[kappa]['median_q99'],
+        'qmax_median': kappa_stats[kappa]['median_max'],
+        'J': params.J,
+        'T': params.T,
+        'g': params.g,
+        'mu': params.mu,
+        'gamma': params.gamma,
+        'sigma': params.sigma,
+        'seed_cal_geo': seed_cal_geo,
+        'seed_cal_neu': seed_cal_neu,
+        'seed_final': seed_final,
+        'log_path': log_path,
+    }
+
+
+def run_epsilon_job_task(task, job_kwargs):
+    idx, eps = task
+    return run_epsilon_job(eps, idx=idx, **job_kwargs)
+
+
 def create_figures(results: List[Dict], output_dir: str = "."):
     """Create the 4 required figures."""
 
@@ -690,7 +782,10 @@ def main():
     parser = argparse.ArgumentParser(description="Clean exponent test for the two-gate model.")
     parser.add_argument("--smoke-test", action="store_true",
                         help="Run a quick smoke test with small L and short sampling.")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Alias for --smoke-test.")
     args = parser.parse_args()
+    smoke_mode = args.smoke_test or args.smoke
 
     print("=" * 70)
     print("CLEAN EXPONENT TEST FOR TWO-GATE MODEL")
@@ -711,11 +806,12 @@ def main():
     kappa_candidates = [20, 30, 40, 50, 65, 80, 100, 130]
     cal_burnin = 200
     cal_sample = 600
+    base_seed = 4000
 
-    if args.smoke_test:
+    if smoke_mode:
         params = replace(params, L=8, n_burnin=120, n_sample=300, n_batches=10)
         epsilon_targets = [0.2, 0.4]
-        kappa_candidates = [40, 50]
+        kappa_candidates = [20, 30, 40, 50]
         cal_burnin = 50
         cal_sample = 100
 
@@ -805,65 +901,38 @@ def main():
     print("=" * 70)
 
     results = []
-    for idx, epsilon in enumerate(epsilon_targets):
-        print(f"\n  Target ε={epsilon:.2f}")
-        chosen = None
-        for kappa in feasible_kappas:
-            params_k = replace(params, kappa=kappa)
-            stats = kappa_stats[kappa]
-            delta, ok_delta = calibrate_delta(params_k, target_p=epsilon,
-                                              median_q=stats['median_q_level'],
-                                              n_burnin=cal_burnin, n_sample=cal_sample,
-                                              seed_base=700 + idx * 10 + int(kappa))
-            if not ok_delta:
-                continue
-            m_tol, ok_m = calibrate_m_tol(params_k, delta, target_p=epsilon,
-                                          n_burnin=cal_burnin, n_sample=cal_sample,
-                                          seed_base=900 + idx * 10 + int(kappa))
-            if ok_m:
-                chosen = (kappa, delta, m_tol)
-                break
+    cpu_total = os.cpu_count() or 1
+    if smoke_mode:
+        processes = min(2, len(epsilon_targets))
+    else:
+        processes = min(len(epsilon_targets), max(1, cpu_total - 1))
 
-        if chosen is None:
-            raise RuntimeError(f"Failed to find feasible κ for ε={epsilon:.2f}.")
+    print(f"  Launching ε jobs with {processes} process(es).")
+    tasks = [(idx, epsilon) for idx, epsilon in enumerate(epsilon_targets)]
+    job_kwargs = {
+        'feasible_kappas': feasible_kappas,
+        'fixed_delta': None,
+        'params': params,
+        'base_seed': base_seed,
+        'kappa_stats': kappa_stats,
+        'cal_burnin': cal_burnin,
+        'cal_sample': cal_sample,
+        'log_dir': "logs",
+    }
+    worker = functools.partial(run_epsilon_job_task, job_kwargs=job_kwargs)
 
-        kappa, delta, m_tol = chosen
-        print(f"  Selected κ={kappa:.1f}, δ={delta:.4f}, m_tol={m_tol:.4f}")
-        params_final = replace(params, kappa=kappa)
-        measurement = run_main_sweep_point((params_final, delta, m_tol, 2000 + idx))
-
-        results.append({
-            'epsilon_target': epsilon,
-            'kappa': kappa,
-            'delta': delta,
-            'm_tol': m_tol,
-            'p_geo': measurement['p_geo'],
-            'p_neu': measurement['p_neu'],
-            'p_both': measurement['p_both'],
-            'rho': measurement['rho'],
-            'stderr_geo': measurement['stderr_geo'],
-            'stderr_neu': measurement['stderr_neu'],
-            'stderr_both': measurement['stderr_both'],
-            'stderr_rho': measurement['stderr_rho'],
-            'accept_spin': measurement['accept_spin'],
-            'accept_theta': measurement['accept_theta'],
-            'mean_abs_phi': measurement['mean_phi'],
-            'mean_m': measurement['mean_m'],
-            'q95_median': kappa_stats[kappa]['median_q_level'],
-            'q99_median': kappa_stats[kappa]['median_q99'],
-            'qmax_median': kappa_stats[kappa]['median_max'],
-            'J': params.J,
-            'T': params.T,
-            'g': params.g,
-            'mu': params.mu,
-            'gamma': params.gamma,
-            'sigma': params.sigma,
-        })
+    with multiprocessing.Pool(processes=processes) as pool:
+        for result in pool.imap_unordered(worker, tasks):
+            results.append(result)
+            print(f"  Completed ε={result['epsilon_target']:.2f} "
+                  f"(κ={result['kappa']:.1f}, log={result['log_path']})")
 
     # ========== PHASE 4: SAVING OUTPUT ==========
     print("\n" + "=" * 70)
     print("PHASE 4: SAVING OUTPUT")
     print("=" * 70)
+
+    results = sorted(results, key=lambda r: r['epsilon_target'])
 
     csv_filename = "robust_matched_results.csv"
     with open(csv_filename, 'w', newline='') as f:
@@ -921,7 +990,7 @@ def main():
     print(f"\n  Total runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print("=" * 70)
 
-    if args.smoke_test:
+    if smoke_mode:
         print("\nSmoke test summary:")
         for res in results:
             rho_str = f"{res['rho']:.3f}" if np.isfinite(res['rho']) else "nan"
