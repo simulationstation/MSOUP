@@ -297,18 +297,16 @@ class TwoGateLattice:
         return np.mean(np.abs(self._phi_cache))
 
     def geometric_gate(self, delta: float) -> bool:
-        # Fractional gate: fraction of plaquettes with |Φ| ≤ δ must be ≥ r_min
-        # This gives smooth control curve instead of extreme-value cliff
-        r_min = 0.97
-        fraction_below = np.mean(np.abs(self._phi_cache) <= delta)
-        return fraction_below >= r_min
+        abs_phi = np.abs(self._phi_cache)
+        q = np.quantile(abs_phi, 0.95)
+        return q <= delta
 
     def neutrality_gate(self, m_tol: float) -> bool:
         return np.abs(self.magnetization()) <= m_tol
 
 
 def run_calibration_point(params: SimulationParams, delta: float, m_tol: float,
-                          n_burnin: int = 200, n_sample: int = 400,
+                          n_burnin: int = 200, n_sample: int = 600,
                           seed: int = None) -> Tuple[float, float]:
     """Quick run to measure p_geo and p_neu for given thresholds."""
     rng = np.random.default_rng(seed)
@@ -331,7 +329,8 @@ def run_calibration_point(params: SimulationParams, delta: float, m_tol: float,
 
 
 def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.2,
-                    tol: float = 0.03, max_iter: int = 15) -> float:
+                    tol: float = 0.03, max_iter: int = 15,
+                    n_burnin: int = 200, n_sample: int = 600) -> float:
     """Bisection search to find δ0 such that p_geo(δ0) ≈ target_p."""
     print(f"  Calibrating δ0 for p_geo ≈ {target_p}...")
 
@@ -339,18 +338,22 @@ def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.
     delta_low, delta_high = 0.05, 2.0
 
     # Check bounds
-    p_low, _ = run_calibration_point(params, delta_low, m_tol, seed=42)
-    p_high, _ = run_calibration_point(params, delta_high, m_tol, seed=42)
+    p_low, _ = run_calibration_point(params, delta_low, m_tol,
+                                     n_burnin=n_burnin, n_sample=n_sample, seed=42)
+    p_high, _ = run_calibration_point(params, delta_high, m_tol,
+                                      n_burnin=n_burnin, n_sample=n_sample, seed=42)
     print(f"    Initial: δ={delta_low:.3f} -> p_geo={p_low:.3f}, δ={delta_high:.3f} -> p_geo={p_high:.3f}")
 
     if p_high < target_p:
         print(f"    Warning: p_geo({delta_high}) = {p_high:.3f} < target. Increasing delta_high.")
         delta_high = 4.0
-        p_high, _ = run_calibration_point(params, delta_high, m_tol, seed=42)
+        p_high, _ = run_calibration_point(params, delta_high, m_tol,
+                                          n_burnin=n_burnin, n_sample=n_sample, seed=42)
 
     for it in range(max_iter):
         delta_mid = (delta_low + delta_high) / 2
-        p_mid, _ = run_calibration_point(params, delta_mid, m_tol, seed=42 + it)
+        p_mid, _ = run_calibration_point(params, delta_mid, m_tol,
+                                         n_burnin=n_burnin, n_sample=n_sample, seed=42 + it)
         print(f"    Iter {it+1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
 
         if abs(p_mid - target_p) < tol:
@@ -363,30 +366,36 @@ def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.
             delta_high = delta_mid
 
     delta_final = (delta_low + delta_high) / 2
-    p_final, _ = run_calibration_point(params, delta_final, m_tol, seed=99)
+    p_final, _ = run_calibration_point(params, delta_final, m_tol,
+                                       n_burnin=n_burnin, n_sample=n_sample, seed=99)
     print(f"  Final: δ0 = {delta_final:.4f} (p_geo = {p_final:.3f})")
     return delta_final
 
 
 def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float = 0.2,
-                    tol: float = 0.03, max_iter: int = 15) -> float:
+                    tol: float = 0.03, max_iter: int = 15,
+                    n_burnin: int = 200, n_sample: int = 600) -> float:
     """Bisection search to find m0 such that p_neu(m0) ≈ target_p."""
     print(f"  Calibrating m0 for p_neu ≈ {target_p}...")
 
     m_low, m_high = 0.01, 0.5
 
-    _, p_low = run_calibration_point(params, delta, m_low, seed=42)
-    _, p_high = run_calibration_point(params, delta, m_high, seed=42)
+    _, p_low = run_calibration_point(params, delta, m_low,
+                                     n_burnin=n_burnin, n_sample=n_sample, seed=42)
+    _, p_high = run_calibration_point(params, delta, m_high,
+                                      n_burnin=n_burnin, n_sample=n_sample, seed=42)
     print(f"    Initial: m={m_low:.3f} -> p_neu={p_low:.3f}, m={m_high:.3f} -> p_neu={p_high:.3f}")
 
     if p_high < target_p:
         print(f"    Warning: p_neu({m_high}) = {p_high:.3f} < target. Increasing m_high.")
         m_high = 1.0
-        _, p_high = run_calibration_point(params, delta, m_high, seed=42)
+        _, p_high = run_calibration_point(params, delta, m_high,
+                                          n_burnin=n_burnin, n_sample=n_sample, seed=42)
 
     for it in range(max_iter):
         m_mid = (m_low + m_high) / 2
-        _, p_mid = run_calibration_point(params, delta, m_mid, seed=42 + it)
+        _, p_mid = run_calibration_point(params, delta, m_mid,
+                                         n_burnin=n_burnin, n_sample=n_sample, seed=42 + it)
         print(f"    Iter {it+1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
 
         if abs(p_mid - target_p) < tol:
@@ -399,7 +408,8 @@ def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float = 0.
             m_high = m_mid
 
     m_final = (m_low + m_high) / 2
-    _, p_final = run_calibration_point(params, delta, m_final, seed=99)
+    _, p_final = run_calibration_point(params, delta, m_final,
+                                       n_burnin=n_burnin, n_sample=n_sample, seed=99)
     print(f"  Final: m0 = {m_final:.4f} (p_neu = {p_final:.3f})")
     return m_final
 
@@ -423,6 +433,9 @@ def run_main_sweep_point(args):
     batch_both = []
     batch_m = []
     batch_phi = []
+    batch_phi_median = []
+    batch_phi_q95 = []
+    batch_phi_max = []
     total_spin_acc = 0
     total_edge_acc = 0
 
@@ -432,6 +445,9 @@ def run_main_sweep_point(args):
         both_count = 0
         m_sum = 0.0
         phi_sum = 0.0
+        phi_median_sum = 0.0
+        phi_q95_sum = 0.0
+        phi_max_sum = 0.0
 
         for _ in range(batch_size):
             spin_acc, edge_acc = lattice.sweep()
@@ -450,12 +466,19 @@ def run_main_sweep_point(args):
 
             m_sum += abs(lattice.magnetization())
             phi_sum += lattice.mean_holonomy_magnitude()
+            abs_phi = np.abs(lattice._phi_cache)
+            phi_median_sum += np.median(abs_phi)
+            phi_q95_sum += np.quantile(abs_phi, 0.95)
+            phi_max_sum += np.max(abs_phi)
 
         batch_geo.append(geo_count / batch_size)
         batch_neu.append(neu_count / batch_size)
         batch_both.append(both_count / batch_size)
         batch_m.append(m_sum / batch_size)
         batch_phi.append(phi_sum / batch_size)
+        batch_phi_median.append(phi_median_sum / batch_size)
+        batch_phi_q95.append(phi_q95_sum / batch_size)
+        batch_phi_max.append(phi_max_sum / batch_size)
 
     # Compute means and stderrs
     p_geo = np.mean(batch_geo)
@@ -487,6 +510,9 @@ def run_main_sweep_point(args):
     accept_theta = total_edge_acc / (params.n_sample * 2 * params.N)
     mean_m = np.mean(batch_m)
     mean_phi = np.mean(batch_phi)
+    mean_phi_median = np.mean(batch_phi_median)
+    mean_phi_q95 = np.mean(batch_phi_q95)
+    mean_phi_max = np.mean(batch_phi_max)
 
     return {
         'p_geo': p_geo,
@@ -501,6 +527,9 @@ def run_main_sweep_point(args):
         'accept_theta': accept_theta,
         'mean_m': mean_m,
         'mean_phi': mean_phi,
+        'mean_phi_median': mean_phi_median,
+        'mean_phi_q95': mean_phi_q95,
+        'mean_phi_max': mean_phi_max,
     }
 
 
@@ -554,9 +583,9 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
     stderr_rho_arr = np.array([r['stderr_rho'] for r in results])
 
     # Filter for included points (not saturated)
-    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.98) & \
-               (p_neu_arr > 0.02) & (p_neu_arr < 0.98) & \
-               (p_both_arr > 0.02) & (p_both_arr < 0.98)
+    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.6) & \
+               (p_neu_arr > 0.02) & (p_neu_arr < 0.6) & \
+               (p_both_arr > 0.02) & (p_both_arr < 0.6)
 
     t_inc = t_arr[included]
     p_geo_inc = p_geo_arr[included]
@@ -643,12 +672,17 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
     products = p_geo_arr * p_neu_arr
     valid = np.isfinite(products) & np.isfinite(p_both_arr) & (products > 0)
 
-    plt.scatter(products[valid], p_both_arr[valid], c=t_arr[valid], cmap='viridis',
-                s=150, edgecolors='black', linewidths=1.5)
-    plt.colorbar(label='t')
+    if np.any(valid):
+        plt.scatter(products[valid], p_both_arr[valid], c=t_arr[valid], cmap='viridis',
+                    s=150, edgecolors='black', linewidths=1.5)
+        plt.colorbar(label='t')
 
-    max_val = max(np.max(products[valid]), np.max(p_both_arr[valid])) * 1.1
-    plt.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x (independence)')
+        max_val = max(np.max(products[valid]), np.max(p_both_arr[valid])) * 1.1
+        plt.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x (independence)')
+    else:
+        max_val = 1.0
+        plt.text(0.5, 0.5, 'No valid points for scatter',
+                 transform=plt.gca().transAxes, ha='center', va='center')
 
     plt.xlabel('p_geo × p_neu', fontsize=14)
     plt.ylabel('p_both', fontsize=14)
@@ -711,7 +745,7 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Data Quality:                                                   ║
 ║    Total points: {len(t_values)}                                  ║
-║    Included in fit: {n_included} (0.02 < p < 0.98 for all gates)  ║
+║    Included in fit: {n_included} (0.02 < p < 0.60 for all gates)  ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  INTERPRETATION:                                                 ║
 ║    Multiplicativity: {"SUPPORTED" if np.isfinite(diff) and abs(diff) < 2*diff_err else "UNCLEAR"}  (c ≈ a + b?)           ║
@@ -730,6 +764,13 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Clean exponent test for the two-gate model.")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Run a quick smoke test with small L and short sampling.")
+    args = parser.parse_args()
+
     print("=" * 70)
     print("CLEAN EXPONENT TEST FOR TWO-GATE MODEL")
     print("=" * 70)
@@ -740,14 +781,22 @@ def main():
     # NOTE: For 2D Ising, T_c = 2J/ln(1+sqrt(2)) ≈ 2.27*J
     # We need T > T_c for magnetization fluctuations around m=0
     # With J=0.4, T_c ≈ 0.91, so T=2.0 gives T/T_c ≈ 2.2 (paramagnetic)
-    # Lower kappa for broader holonomy distribution (more dynamic range)
     params = SimulationParams(
         L=16, T=2.5, J=0.35, h=0.0,
-        kappa=3.0, g=0.2,  # Very low kappa for broad holonomy distribution
+        kappa=50.0, g=0.5,
         mu=1.0, gamma=0.2, sigma=1.0,
         dtheta=0.6,
         n_burnin=200, n_sample=800, n_batches=10
     )
+
+    t_values = [0.20, 0.35, 0.50, 0.70, 0.85, 1.00]  # 6 points for quick test
+
+    if args.smoke_test:
+        params.L = 8
+        params.n_burnin = 50
+        params.n_sample = 100
+        params.n_batches = 10
+        t_values = [0.50, 1.00]
 
     print(f"\nBase parameters:")
     print(f"  L={params.L}, T={params.T}, J={params.J}, kappa={params.kappa}, g={params.g}")
@@ -774,7 +823,7 @@ def main():
 
     # Verify calibration
     print("\n  Verifying calibration at t=1...")
-    p_geo_cal, p_neu_cal = run_calibration_point(params, delta0, m0, n_burnin=300, n_sample=600, seed=999)
+    p_geo_cal, p_neu_cal = run_calibration_point(params, delta0, m0, n_burnin=200, n_sample=600, seed=999)
     print(f"  Verified: p_geo = {p_geo_cal:.3f}, p_neu = {p_neu_cal:.3f}")
 
     # Check if calibration is acceptable
@@ -787,8 +836,6 @@ def main():
     print("\n" + "=" * 70)
     print("PHASE 2: MAIN SWEEP")
     print("=" * 70)
-
-    t_values = [0.20, 0.35, 0.50, 0.70, 0.85, 1.00]  # 6 points for quick test
 
     print(f"\n  Running {len(t_values)} t-values with {params.n_sample} samples each...")
     print(f"  (burn-in: {params.n_burnin}, batches: {params.n_batches})")
@@ -830,9 +877,9 @@ def main():
     p_both_arr = np.array([r['p_both'] for r in results])
 
     for r in results:
-        inc = "yes" if (0.02 < r['p_geo'] < 0.98 and
-                        0.02 < r['p_neu'] < 0.98 and
-                        0.02 < r['p_both'] < 0.98) else "no"
+        inc = "yes" if (0.02 < r['p_geo'] < 0.6 and
+                        0.02 < r['p_neu'] < 0.6 and
+                        0.02 < r['p_both'] < 0.6) else "no"
         rho_str = f"{r['rho']:.3f}" if np.isfinite(r['rho']) else "nan"
         print(f"  {r['t']:>6.2f} | {r['delta']:>6.4f} | {r['m_tol']:>6.4f} | "
               f"{r['p_geo']:>7.4f} | {r['p_neu']:>7.4f} | {r['p_both']:>7.4f} | "
@@ -841,9 +888,9 @@ def main():
     print("  " + "-" * 90)
 
     # Filter for slope fitting
-    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.98) & \
-               (p_neu_arr > 0.02) & (p_neu_arr < 0.98) & \
-               (p_both_arr > 0.02) & (p_both_arr < 0.98)
+    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.6) & \
+               (p_neu_arr > 0.02) & (p_neu_arr < 0.6) & \
+               (p_both_arr > 0.02) & (p_both_arr < 0.6)
 
     n_included = np.sum(included)
     print(f"\n  Points included in fit: {n_included} / {len(t_values)}")
@@ -892,6 +939,18 @@ def main():
             print("    => Consistent with gate independence (ρ ≈ 1)")
         else:
             print("    => Deviation from independence")
+
+    def log_phi_stats(results_list: List[Dict], t_target: float):
+        for res in results_list:
+            if np.isclose(res['t'], t_target, atol=1e-8):
+                print(f"\n  |Phi| stats at t={t_target:.2f}:")
+                print(f"    median = {res['mean_phi_median']:.4f}")
+                print(f"    q95    = {res['mean_phi_q95']:.4f}")
+                print(f"    max    = {res['mean_phi_max']:.4f}")
+                return
+
+    log_phi_stats(results, 1.0)
+    log_phi_stats(results, 0.2)
 
     # ========== OUTPUT FILES ==========
     print("\n" + "=" * 70)
@@ -976,6 +1035,13 @@ def main():
 
     print(f"\n  Total runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print("=" * 70)
+
+    if args.smoke_test:
+        print("\nSmoke test summary:")
+        for res in results:
+            rho_str = f"{res['rho']:.3f}" if np.isfinite(res['rho']) else "nan"
+            print(f"  t={res['t']:.2f}: p_geo={res['p_geo']:.4f}, "
+                  f"p_neu={res['p_neu']:.4f}, p_both={res['p_both']:.4f}, rho={rho_str}")
 
 
 if __name__ == "__main__":
