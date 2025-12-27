@@ -372,90 +372,141 @@ def _estimate_p_geo(params: SimulationParams, delta: float,
 
 
 def calibrate_delta(params: SimulationParams, target_p: float, median_q: float,
-                    n_burnin: int = 200, n_sample: int = 600,
-                    max_iter: int = 10, tol: float = 0.02, seed_base: int = 123) -> Tuple[float, bool]:
+                    n_burnin_bracket: int = 80, n_sample_bracket: int = 150,
+                    n_burnin_iter: int = 80, n_sample_iter: int = 200,
+                    n_burnin_iter_final: int = 120, n_sample_iter_final: int = 400,
+                    n_burnin_verify: int = 150, n_sample_verify: int = 600,
+                    max_iter: int = 10, tol: float = 0.03, seed_base: int = 123
+                    ) -> Tuple[float, bool, float, float]:
     """Bisection search to find δ such that p_geo(δ) ≈ target_p."""
     print(f"  Calibrating δ for p_geo ≈ {target_p:.3f} (q_level={params.q_level:.2f})...")
 
     base = max(median_q, 1e-3)
-    delta_low = max(0.5 * base, 1e-4)
-    delta_high = min(1.5 * base, np.pi)
+    delta_mid = base
+    delta_low = max(0.5 * delta_mid, 0.001)
+    delta_high = min(1.5 * delta_mid, 2.5)
 
-    p_low = _estimate_p_geo(params, delta_low, n_burnin, n_sample, seed_base)
-    p_high = _estimate_p_geo(params, delta_high, n_burnin, n_sample, seed_base)
+    p_low = _estimate_p_geo(params, delta_low, n_burnin_bracket, n_sample_bracket, seed_base)
+    p_high = _estimate_p_geo(params, delta_high, n_burnin_bracket, n_sample_bracket, seed_base + 1)
     print(f"    Initial bracket: δ={delta_low:.4f} -> p_geo={p_low:.3f}, "
           f"δ={delta_high:.4f} -> p_geo={p_high:.3f}")
 
     expand_steps = 0
-    while not (p_low < target_p < p_high) and expand_steps < 6:
-        if p_low >= target_p:
+    while not (p_low <= target_p <= p_high) and expand_steps < 10:
+        if p_low > target_p and delta_low > 0.001:
             delta_high = delta_low
-            delta_low = max(delta_low * 0.5, 1e-4)
-        elif p_high <= target_p:
+            delta_low = max(delta_low / 1.3, 0.001)
+        elif p_high < target_p and delta_high < 2.5:
             delta_low = delta_high
-            delta_high = min(delta_high * 1.5, np.pi)
-        p_low = _estimate_p_geo(params, delta_low, n_burnin, n_sample, seed_base)
-        p_high = _estimate_p_geo(params, delta_high, n_burnin, n_sample, seed_base)
+            delta_high = min(delta_high * 1.3, 2.5)
+        else:
+            break
+        p_low = _estimate_p_geo(params, delta_low, n_burnin_bracket, n_sample_bracket,
+                                seed_base + 2 + expand_steps)
+        p_high = _estimate_p_geo(params, delta_high, n_burnin_bracket, n_sample_bracket,
+                                 seed_base + 22 + expand_steps)
         expand_steps += 1
         print(f"    Expanded bracket {expand_steps}: δ={delta_low:.4f} -> p_geo={p_low:.3f}, "
               f"δ={delta_high:.4f} -> p_geo={p_high:.3f}")
 
-    if not (p_low < target_p < p_high):
-        print("    Failed to bracket target p_geo; marking κ infeasible.")
-        return delta_high, False
+    if not (p_low <= target_p <= p_high):
+        print("    Failed to bracket target p_geo (no bracket).")
+        if abs(p_low - target_p) <= abs(p_high - target_p):
+            p_best = p_low
+            delta_best = delta_low
+        else:
+            p_best = p_high
+            delta_best = delta_high
+        err_geo = abs(p_best - target_p)
+        return delta_best, False, p_best, err_geo
 
-    delta_mid = delta_high
+    p_mid = p_high
     for it in range(max_iter):
         delta_mid = 0.5 * (delta_low + delta_high)
-        p_mid = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + it)
+        if it >= max_iter - 2:
+            n_burnin = n_burnin_iter_final
+            n_sample = n_sample_iter_final
+        else:
+            n_burnin = n_burnin_iter
+            n_sample = n_sample_iter
+        p_mid = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + 50 + it)
         print(f"    Iter {it + 1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
         if abs(p_mid - target_p) < tol:
             print(f"  Early stop: |p_geo - target| < {tol}")
-            return delta_mid, True
+            break
         if p_mid < target_p:
             delta_low = delta_mid
         else:
             delta_high = delta_mid
 
-    print(f"  Final δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
-    return delta_mid, True
+    p_verify = _estimate_p_geo(params, delta_mid, n_burnin_verify, n_sample_verify,
+                               seed_base + 500)
+    err_geo = abs(p_verify - target_p)
+    ok = err_geo <= tol
+    print(f"  Verified δ={delta_mid:.4f} -> p_geo={p_verify:.3f} (err={err_geo:.3f})")
+    return delta_mid, ok, p_verify, err_geo
 
 
 def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float,
-                    n_burnin: int = 200, n_sample: int = 600,
-                    max_iter: int = 10, tol: float = 0.02, seed_base: int = 321) -> Tuple[float, bool]:
+                    n_burnin_bracket: int = 80, n_sample_bracket: int = 150,
+                    n_burnin_iter: int = 80, n_sample_iter: int = 200,
+                    n_burnin_iter_final: int = 120, n_sample_iter_final: int = 400,
+                    n_burnin_verify: int = 150, n_sample_verify: int = 600,
+                    max_iter: int = 10, tol: float = 0.03, seed_base: int = 321
+                    ) -> Tuple[float, bool, float, float]:
     """Bisection search to find m_tol such that p_neu(m_tol) ≈ target_p."""
     print(f"  Calibrating m_tol for p_neu ≈ {target_p:.3f}...")
 
-    m_low, m_high = 0.01, 0.99
+    m_low, m_high = 0.001, 0.999
     _, p_low = run_calibration_point(params, delta, m_low,
-                                     n_burnin=n_burnin, n_sample=n_sample, seed=seed_base)
+                                     n_burnin=n_burnin_bracket, n_sample=n_sample_bracket,
+                                     seed=seed_base)
     _, p_high = run_calibration_point(params, delta, m_high,
-                                      n_burnin=n_burnin, n_sample=n_sample, seed=seed_base)
+                                      n_burnin=n_burnin_bracket, n_sample=n_sample_bracket,
+                                      seed=seed_base + 1)
     print(f"    Initial bracket: m={m_low:.3f} -> p_neu={p_low:.3f}, "
           f"m={m_high:.3f} -> p_neu={p_high:.3f}")
 
-    if not (p_low < target_p < p_high):
-        print("    Failed to bracket target p_neu.")
-        return m_high, False
+    if not (p_low <= target_p <= p_high):
+        print("    Failed to bracket target p_neu (no bracket).")
+        if abs(p_low - target_p) <= abs(p_high - target_p):
+            p_best = p_low
+            m_best = m_low
+        else:
+            p_best = p_high
+            m_best = m_high
+        err_neu = abs(p_best - target_p)
+        return m_best, False, p_best, err_neu
 
     m_mid = m_high
+    p_mid = p_high
     for it in range(max_iter):
         m_mid = 0.5 * (m_low + m_high)
+        if it >= max_iter - 2:
+            n_burnin = n_burnin_iter_final
+            n_sample = n_sample_iter_final
+        else:
+            n_burnin = n_burnin_iter
+            n_sample = n_sample_iter
         _, p_mid = run_calibration_point(params, delta, m_mid,
                                          n_burnin=n_burnin, n_sample=n_sample,
-                                         seed=seed_base + it)
+                                         seed=seed_base + 50 + it)
         print(f"    Iter {it + 1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
         if abs(p_mid - target_p) < tol:
             print(f"  Early stop: |p_neu - target| < {tol}")
-            return m_mid, True
+            break
         if p_mid < target_p:
             m_low = m_mid
         else:
             m_high = m_mid
 
-    print(f"  Final m_tol={m_mid:.4f} -> p_neu={p_mid:.3f}")
-    return m_mid, True
+    _, p_verify = run_calibration_point(params, delta, m_mid,
+                                        n_burnin=n_burnin_verify, n_sample=n_sample_verify,
+                                        seed=seed_base + 500)
+    err_neu = abs(p_verify - target_p)
+    ok = err_neu <= tol
+    print(f"  Verified m_tol={m_mid:.4f} -> p_neu={p_verify:.3f} (err={err_neu:.3f})")
+    return m_mid, ok, p_verify, err_neu
 
 
 def run_main_sweep_point(args):
@@ -533,17 +584,7 @@ def run_main_sweep_point(args):
     stderr_neu = np.std(batch_neu) / np.sqrt(n_batches)
     stderr_both = np.std(batch_both) / np.sqrt(n_batches)
 
-    # Compute rho per batch and then average
-    rho_batches = []
-    for i in range(n_batches):
-        prod = batch_geo[i] * batch_neu[i]
-        if prod > 1e-10:
-            rho_batches.append(batch_both[i] / prod)
-
-    if len(rho_batches) >= 3:
-        rho = np.mean(rho_batches)
-        stderr_rho = np.std(rho_batches) / np.sqrt(len(rho_batches))
-    elif p_geo * p_neu > 1e-10:
+    if p_geo > 0.01 and p_neu > 0.01:
         rho = p_both / (p_geo * p_neu)
         stderr_rho = np.nan
     else:
@@ -580,10 +621,13 @@ def run_main_sweep_point(args):
 def run_epsilon_job(eps: float, feasible_kappas: List[float], fixed_delta: float = None,
                     params: SimulationParams = None, base_seed: int = 0, idx: int = 0,
                     kappa_stats: Dict[float, Dict[str, float]] = None,
-                    cal_burnin: int = 200, cal_sample: int = 600,
+                    cal_config: Dict[str, int] = None, tau: float = 0.03,
                     log_dir: str = "logs") -> Dict[str, float]:
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"eps_{idx}_{eps:.2f}.log")
+
+    if cal_config is None:
+        raise ValueError("cal_config must be provided.")
 
     seed_cal_geo = base_seed + 1000 * idx + 11
     seed_cal_neu = base_seed + 1000 * idx + 23
@@ -597,41 +641,114 @@ def run_epsilon_job(eps: float, feasible_kappas: List[float], fixed_delta: float
         print(f"Feasible κ list: {feasible_kappas}")
 
         chosen = None
+        best_ok = None
+        best_effort = None
         for kappa in feasible_kappas:
             params_k = replace(params, kappa=kappa)
             stats = kappa_stats[kappa]
             if fixed_delta is None:
-                delta, ok_delta = calibrate_delta(params_k, target_p=eps,
-                                                  median_q=stats['median_q_level'],
-                                                  n_burnin=cal_burnin, n_sample=cal_sample,
-                                                  seed_base=seed_cal_geo)
+                delta, ok_delta, p_geo_hat, err_geo = calibrate_delta(
+                    params_k,
+                    target_p=eps,
+                    median_q=stats['median_q_level'],
+                    n_burnin_bracket=cal_config['bracket_burnin'],
+                    n_sample_bracket=cal_config['bracket_sample'],
+                    n_burnin_iter=cal_config['iter_burnin'],
+                    n_sample_iter=cal_config['iter_sample'],
+                    n_burnin_iter_final=cal_config['iter_final_burnin'],
+                    n_sample_iter_final=cal_config['iter_final_sample'],
+                    n_burnin_verify=cal_config['verify_burnin'],
+                    n_sample_verify=cal_config['verify_sample'],
+                    tol=tau,
+                    seed_base=seed_cal_geo + int(kappa))
             else:
                 delta = fixed_delta
-                ok_delta = True
+                p_geo_hat = _estimate_p_geo(
+                    params_k,
+                    delta,
+                    cal_config['verify_burnin'],
+                    cal_config['verify_sample'],
+                    seed_cal_geo + int(kappa))
+                err_geo = abs(p_geo_hat - eps)
+                ok_delta = err_geo <= tau
 
-            if not ok_delta:
-                continue
+            m_tol, ok_m, p_neu_hat, err_neu = calibrate_m_tol(
+                params_k,
+                delta,
+                target_p=eps,
+                n_burnin_bracket=cal_config['bracket_burnin'],
+                n_sample_bracket=cal_config['bracket_sample'],
+                n_burnin_iter=cal_config['iter_burnin'],
+                n_sample_iter=cal_config['iter_sample'],
+                n_burnin_iter_final=cal_config['iter_final_burnin'],
+                n_sample_iter_final=cal_config['iter_final_sample'],
+                n_burnin_verify=cal_config['verify_burnin'],
+                n_sample_verify=cal_config['verify_sample'],
+                tol=tau,
+                seed_base=seed_cal_neu + int(kappa))
+            score = err_geo + err_neu
+            candidate = {
+                'kappa': kappa,
+                'delta': delta,
+                'm_tol': m_tol,
+                'p_geo_hat': p_geo_hat,
+                'p_neu_hat': p_neu_hat,
+                'err_geo': err_geo,
+                'err_neu': err_neu,
+                'score': score,
+                'ok_geo': ok_delta,
+                'ok_neu': ok_m,
+            }
+            if best_effort is None or score < best_effort['score']:
+                best_effort = candidate
+            if ok_m and ok_delta:
+                if best_ok is None or score < best_ok['score']:
+                    best_ok = candidate
 
-            m_tol, ok_m = calibrate_m_tol(params_k, delta, target_p=eps,
-                                          n_burnin=cal_burnin, n_sample=cal_sample,
-                                          seed_base=seed_cal_neu)
-            if ok_m:
-                chosen = (kappa, delta, m_tol)
-                break
+        if best_ok is None or best_ok['score'] > 2 * tau:
+            fail_reason = "no_kappa_within_tau"
+            chosen = best_effort
+            status = "FAIL"
+            measurement = {
+                'p_geo': float('nan'),
+                'p_neu': float('nan'),
+                'p_both': float('nan'),
+                'rho': float('nan'),
+                'stderr_geo': float('nan'),
+                'stderr_neu': float('nan'),
+                'stderr_both': float('nan'),
+                'stderr_rho': float('nan'),
+                'accept_spin': float('nan'),
+                'accept_theta': float('nan'),
+                'mean_m': float('nan'),
+                'mean_phi': float('nan'),
+            }
+        else:
+            chosen = best_ok
+            status = "SUCCESS"
+            fail_reason = ""
 
-        if chosen is None:
-            raise RuntimeError(f"Failed to find feasible κ for ε={eps:.2f}.")
-
-        kappa, delta, m_tol = chosen
-        print(f"Selected κ={kappa:.1f}, δ={delta:.4f}, m_tol={m_tol:.4f}")
-        params_final = replace(params, kappa=kappa)
-        measurement = run_main_sweep_point((params_final, delta, m_tol, seed_final))
+        kappa = chosen['kappa']
+        delta = chosen['delta']
+        m_tol = chosen['m_tol']
+        print(f"Selected κ={kappa:.1f}, δ={delta:.4f}, m_tol={m_tol:.4f} "
+              f"(status={status}, score={chosen['score']:.3f})")
+        if status == "SUCCESS":
+            params_final = replace(params, kappa=kappa)
+            measurement = run_main_sweep_point((params_final, delta, m_tol, seed_final))
 
     return {
         'epsilon_target': eps,
+        'status': status,
+        'fail_reason': fail_reason,
         'kappa': kappa,
         'delta': delta,
         'm_tol': m_tol,
+        'p_geo_hat': chosen['p_geo_hat'],
+        'p_neu_hat': chosen['p_neu_hat'],
+        'err_geo': chosen['err_geo'],
+        'err_neu': chosen['err_neu'],
+        'score': chosen['score'],
         'p_geo': measurement['p_geo'],
         'p_neu': measurement['p_neu'],
         'p_both': measurement['p_both'],
@@ -666,39 +783,37 @@ def run_epsilon_job_task(task, job_kwargs):
 
 
 def run_kappa_feasibility_task(args):
-    """Worker for parallel κ feasibility scan."""
-    kappa, params, cal_burnin, cal_sample, seed_base = args
+    """Worker for κ feasibility scan."""
+    kappa, params, n_burnin, n_sample, seed_base = args
     params_k = replace(params, kappa=kappa)
-    stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=200 + int(kappa))
-
-    delta_try, ok = calibrate_delta(params_k, target_p=0.2,
-                                    median_q=stats['median_q_level'],
-                                    n_burnin=cal_burnin, n_sample=cal_sample,
-                                    seed_base=seed_base + int(kappa))
+    stats = probe_run_stats(params_k, n_burnin=n_burnin, n_sample=n_sample, seed=seed_base)
     return {
         'kappa': kappa,
-        'stats': stats,
-        'delta': delta_try,
-        'feasible': ok
+        'stats': stats
     }
 
 
 def create_figures(results: List[Dict], output_dir: str = "."):
     """Create the 4 required figures."""
 
-    epsilon_targets = np.array([r['epsilon_target'] for r in results])
-    p_geo_arr = np.array([r['p_geo'] for r in results])
-    p_neu_arr = np.array([r['p_neu'] for r in results])
-    p_both_arr = np.array([r['p_both'] for r in results])
-    rho_arr = np.array([r['rho'] for r in results])
-    stderr_geo_arr = np.array([r['stderr_geo'] for r in results])
-    stderr_neu_arr = np.array([r['stderr_neu'] for r in results])
-    stderr_both_arr = np.array([r['stderr_both'] for r in results])
-    stderr_rho_arr = np.array([r['stderr_rho'] for r in results])
-    kappa_arr = np.array([r['kappa'] for r in results])
-    q95_median_arr = np.array([r['q95_median'] for r in results])
-    q99_median_arr = np.array([r['q99_median'] for r in results])
-    qmax_median_arr = np.array([r['qmax_median'] for r in results])
+    success_results = [r for r in results if r['status'] == "SUCCESS"]
+    if not success_results:
+        print("No SUCCESS points available for plotting.")
+        return
+
+    epsilon_targets = np.array([r['epsilon_target'] for r in success_results])
+    p_geo_arr = np.array([r['p_geo'] for r in success_results])
+    p_neu_arr = np.array([r['p_neu'] for r in success_results])
+    p_both_arr = np.array([r['p_both'] for r in success_results])
+    rho_arr = np.array([r['rho'] for r in success_results])
+    stderr_geo_arr = np.array([r['stderr_geo'] for r in success_results])
+    stderr_neu_arr = np.array([r['stderr_neu'] for r in success_results])
+    stderr_both_arr = np.array([r['stderr_both'] for r in success_results])
+    stderr_rho_arr = np.array([r['stderr_rho'] for r in success_results])
+    kappa_arr = np.array([r['kappa'] for r in success_results])
+    q95_median_arr = np.array([r['q95_median'] for r in success_results])
+    q99_median_arr = np.array([r['q99_median'] for r in success_results])
+    qmax_median_arr = np.array([r['qmax_median'] for r in success_results])
 
     # 1.png: p_both vs p_geo*p_neu
     plt.figure(figsize=(8, 8))
@@ -824,16 +939,41 @@ def main():
 
     epsilon_targets = [0.10, 0.15, 0.20, 0.30, 0.40]
     kappa_candidates = [20, 30, 40, 50, 65, 80]
-    cal_burnin = 200
-    cal_sample = 600
+    tau = 0.03
+    q95_low = 0.15
+    q95_high = 0.75
+    cal_config = {
+        'bracket_burnin': 80,
+        'bracket_sample': 150,
+        'iter_burnin': 80,
+        'iter_sample': 200,
+        'iter_final_burnin': 120,
+        'iter_final_sample': 400,
+        'verify_burnin': 150,
+        'verify_sample': 600,
+    }
     base_seed = 4000
+
+    phase2_burnin = 100
+    phase2_sample = 200
 
     if smoke_mode:
         params = replace(params, L=8, n_burnin=120, n_sample=300, n_batches=10)
         epsilon_targets = [0.2, 0.4]
         kappa_candidates = [20, 30, 40, 50]
-        cal_burnin = 50
-        cal_sample = 100
+        scale = 0.2
+        phase2_burnin = max(20, int(phase2_burnin * scale))
+        phase2_sample = max(40, int(phase2_sample * scale))
+        cal_config = {
+            'bracket_burnin': max(10, int(cal_config['bracket_burnin'] * scale)),
+            'bracket_sample': max(20, int(cal_config['bracket_sample'] * scale)),
+            'iter_burnin': max(10, int(cal_config['iter_burnin'] * scale)),
+            'iter_sample': max(25, int(cal_config['iter_sample'] * scale)),
+            'iter_final_burnin': max(15, int(cal_config['iter_final_burnin'] * scale)),
+            'iter_final_sample': max(40, int(cal_config['iter_final_sample'] * scale)),
+            'verify_burnin': max(20, int(cal_config['verify_burnin'] * scale)),
+            'verify_sample': max(60, int(cal_config['verify_sample'] * scale)),
+        }
 
     print(f"\nBase parameters:")
     print(f"  L={params.L}, T={params.T}, J={params.J}, g={params.g}")
@@ -867,53 +1007,29 @@ def main():
 
     # ========== PHASE 2: KAPPA FEASIBILITY SCAN ==========
     print("\n" + "=" * 70)
-    print("PHASE 2: KAPPA FEASIBILITY SCAN (PARALLEL)")
+    print("PHASE 2: KAPPA FEASIBILITY SCAN")
     print("=" * 70)
 
     kappa_stats = {}
     feasible_kappas = []
 
-    cpu_total = os.cpu_count() or 1
-    phase2_processes = min(len(kappa_candidates), max(1, cpu_total - 1))
-    print(f"  Scanning {len(kappa_candidates)} κ values with {phase2_processes} processes...")
+    print(f"  Scanning κ values (target q95 in [{q95_low:.2f}, {q95_high:.2f}])...")
 
-    phase2_tasks = [(kappa, params, cal_burnin, cal_sample, 400) for kappa in kappa_candidates]
-
-    with multiprocessing.Pool(processes=phase2_processes) as pool:
-        phase2_results = pool.map(run_kappa_feasibility_task, phase2_tasks)
-
-    for res in sorted(phase2_results, key=lambda x: x['kappa']):
-        kappa = res['kappa']
+    for idx, kappa in enumerate(kappa_candidates):
+        res = run_kappa_feasibility_task((kappa, params, phase2_burnin, phase2_sample, 200 + idx))
         stats = res['stats']
         kappa_stats[kappa] = stats
+        q95 = stats['median_q_level']
         print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
               f"q95={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
               f"max={stats['median_max']:.4f}")
-        if res['feasible']:
+        if q95_low <= q95 <= q95_high:
             feasible_kappas.append(kappa)
-            print(f"    Feasible κ={kappa:.1f} with δ≈{res['delta']:.4f}")
+            print(f"    Usable κ={kappa:.1f}")
         else:
-            print(f"    Infeasible κ={kappa:.1f}")
-
-    if not feasible_kappas and params.q_level > 0.90:
-        print("\n  No feasible κ found. Relaxing q_level to 0.90 and rescanning (parallel)...")
-        params = replace(params, q_level=0.90)
-        feasible_kappas = []
-
-        phase2_tasks_retry = [(kappa, params, cal_burnin, cal_sample, 460) for kappa in kappa_candidates]
-        with multiprocessing.Pool(processes=phase2_processes) as pool:
-            phase2_results_retry = pool.map(run_kappa_feasibility_task, phase2_tasks_retry)
-
-        for res in sorted(phase2_results_retry, key=lambda x: x['kappa']):
-            kappa = res['kappa']
-            stats = res['stats']
-            kappa_stats[kappa] = stats
-            print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
-                  f"q90={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
-                  f"max={stats['median_max']:.4f}")
-            if res['feasible']:
-                feasible_kappas.append(kappa)
-                print(f"    Feasible κ={kappa:.1f} with δ≈{res['delta']:.4f}")
+            print(f"    Skipping κ={kappa:.1f} (q95 out of range)")
+        if len(feasible_kappas) >= 4:
+            break
 
     if not feasible_kappas:
         raise RuntimeError("No feasible κ found; cannot proceed with matched-permeability test.")
@@ -940,8 +1056,8 @@ def main():
         'params': params,
         'base_seed': base_seed,
         'kappa_stats': kappa_stats,
-        'cal_burnin': cal_burnin,
-        'cal_sample': cal_sample,
+        'cal_config': cal_config,
+        'tau': tau,
         'log_dir': "logs",
     }
     worker = functools.partial(run_epsilon_job_task, job_kwargs=job_kwargs)
@@ -950,7 +1066,8 @@ def main():
         for result in pool.imap_unordered(worker, tasks):
             results.append(result)
             print(f"  Completed ε={result['epsilon_target']:.2f} "
-                  f"(κ={result['kappa']:.1f}, log={result['log_path']})")
+                  f"(κ={result['kappa']:.1f}, status={result['status']}, "
+                  f"log={result['log_path']})")
 
     # ========== PHASE 4: SAVING OUTPUT ==========
     print("\n" + "=" * 70)
@@ -962,19 +1079,29 @@ def main():
     csv_filename = "robust_matched_results.csv"
     with open(csv_filename, 'w', newline='') as f:
         fieldnames = [
-            'epsilon_target', 'kappa', 'delta', 'm_tol', 'p_geo', 'p_neu', 'p_both', 'rho',
+            'epsilon_target', 'status', 'fail_reason',
+            'kappa', 'delta', 'm_tol',
+            'p_geo_hat', 'p_neu_hat', 'err_geo', 'err_neu', 'score',
+            'p_geo', 'p_neu', 'p_both', 'rho',
             'stderr_p_geo', 'stderr_p_neu', 'stderr_p_both', 'stderr_rho',
+            'mean_abs_phi', 'mean_m', 'accept_spin', 'accept_theta',
             'J', 'T', 'g', 'mu', 'gamma', 'sigma',
-            'mean_abs_phi', 'mean_m', 'accept_spin', 'accept_theta'
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
             writer.writerow({
                 'epsilon_target': r['epsilon_target'],
+                'status': r['status'],
+                'fail_reason': r['fail_reason'],
                 'kappa': r['kappa'],
                 'delta': r['delta'],
                 'm_tol': r['m_tol'],
+                'p_geo_hat': r['p_geo_hat'],
+                'p_neu_hat': r['p_neu_hat'],
+                'err_geo': r['err_geo'],
+                'err_neu': r['err_neu'],
+                'score': r['score'],
                 'p_geo': r['p_geo'],
                 'p_neu': r['p_neu'],
                 'p_both': r['p_both'],
@@ -1004,14 +1131,15 @@ def main():
     print("FINAL REPORT")
     print("=" * 70)
 
-    rho_arr = np.array([r['rho'] for r in results])
+    success_results = [r for r in results if r['status'] == "SUCCESS"]
+    rho_arr = np.array([r['rho'] for r in success_results])
     rho_valid = rho_arr[np.isfinite(rho_arr)]
     if len(rho_valid) > 0:
         mean_rho = np.mean(rho_valid)
         stderr_rho = np.std(rho_valid) / np.sqrt(len(rho_valid))
         print(f"\n  Mean ρ across ε: {mean_rho:.3f} ± {stderr_rho:.3f}")
 
-    print(f"\n  Data points: {len(results)}")
+    print(f"\n  Data points: {len(results)} (SUCCESS={len(success_results)})")
     print(f"\n  Total runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print("=" * 70)
 
@@ -1021,7 +1149,8 @@ def main():
             rho_str = f"{res['rho']:.3f}" if np.isfinite(res['rho']) else "nan"
             print(f"  ε={res['epsilon_target']:.2f} κ={res['kappa']:.1f}: "
                   f"p_geo={res['p_geo']:.4f}, p_neu={res['p_neu']:.4f}, "
-                  f"p_both={res['p_both']:.4f}, rho={rho_str}")
+                  f"p_both={res['p_both']:.4f}, rho={rho_str}, "
+                  f"status={res['status']}")
 
 
 if __name__ == "__main__":
