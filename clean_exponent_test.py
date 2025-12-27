@@ -2,15 +2,13 @@
 """
 Clean Exponent Test for Two-Gate Model
 
-Tests multiplicativity (c ≈ a + b) and gate independence (ρ ≈ 1) in a regime
-where BOTH gates have real dynamic range (0.05 ≤ p ≤ 0.5).
-
-Calibration ensures p_geo(t=1) ≈ 0.2 and p_neu(t=1) ≈ 0.2.
+Sweeps κ with fixed geometric gate and matches neutrality permeability
+so that p_neu ≈ p_geo at each κ.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Tuple, List, Dict
 import csv
 import time
@@ -331,11 +329,11 @@ def run_calibration_point(params: SimulationParams, delta: float, m_tol: float,
 def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.2,
                     tol: float = 0.03, max_iter: int = 15,
                     n_burnin: int = 200, n_sample: int = 600) -> float:
-    """Bisection search to find δ0 such that p_geo(δ0) ≈ target_p."""
-    print(f"  Calibrating δ0 for p_geo ≈ {target_p}...")
+    """Bisection search to find δ such that p_geo(δ) ≈ target_p."""
+    print(f"  Calibrating δ for p_geo ≈ {target_p}...")
 
     # Start with initial bracket
-    delta_low, delta_high = 0.05, 2.0
+    delta_low, delta_high = 0.05, 1.5
 
     # Check bounds
     p_low, _ = run_calibration_point(params, delta_low, m_tol,
@@ -344,12 +342,6 @@ def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.
                                       n_burnin=n_burnin, n_sample=n_sample, seed=42)
     print(f"    Initial: δ={delta_low:.3f} -> p_geo={p_low:.3f}, δ={delta_high:.3f} -> p_geo={p_high:.3f}")
 
-    if p_high < target_p:
-        print(f"    Warning: p_geo({delta_high}) = {p_high:.3f} < target. Increasing delta_high.")
-        delta_high = 4.0
-        p_high, _ = run_calibration_point(params, delta_high, m_tol,
-                                          n_burnin=n_burnin, n_sample=n_sample, seed=42)
-
     for it in range(max_iter):
         delta_mid = (delta_low + delta_high) / 2
         p_mid, _ = run_calibration_point(params, delta_mid, m_tol,
@@ -357,7 +349,7 @@ def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.
         print(f"    Iter {it+1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
 
         if abs(p_mid - target_p) < tol:
-            print(f"  Converged: δ0 = {delta_mid:.4f} (p_geo = {p_mid:.3f})")
+            print(f"  Converged: δ = {delta_mid:.4f} (p_geo = {p_mid:.3f})")
             return delta_mid
 
         if p_mid < target_p:
@@ -368,15 +360,15 @@ def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.
     delta_final = (delta_low + delta_high) / 2
     p_final, _ = run_calibration_point(params, delta_final, m_tol,
                                        n_burnin=n_burnin, n_sample=n_sample, seed=99)
-    print(f"  Final: δ0 = {delta_final:.4f} (p_geo = {p_final:.3f})")
+    print(f"  Final: δ = {delta_final:.4f} (p_geo = {p_final:.3f})")
     return delta_final
 
 
-def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float = 0.2,
+def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float,
                     tol: float = 0.03, max_iter: int = 15,
                     n_burnin: int = 200, n_sample: int = 600) -> float:
-    """Bisection search to find m0 such that p_neu(m0) ≈ target_p."""
-    print(f"  Calibrating m0 for p_neu ≈ {target_p}...")
+    """Bisection search to find m_tol such that p_neu(m_tol) ≈ target_p."""
+    print(f"  Calibrating m_tol for p_neu ≈ {target_p:.3f}...")
 
     m_low, m_high = 0.01, 0.5
 
@@ -399,7 +391,7 @@ def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float = 0.
         print(f"    Iter {it+1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
 
         if abs(p_mid - target_p) < tol:
-            print(f"  Converged: m0 = {m_mid:.4f} (p_neu = {p_mid:.3f})")
+            print(f"  Converged: m_tol = {m_mid:.4f} (p_neu = {p_mid:.3f})")
             return m_mid
 
         if p_mid < target_p:
@@ -410,7 +402,7 @@ def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float = 0.
     m_final = (m_low + m_high) / 2
     _, p_final = run_calibration_point(params, delta, m_final,
                                        n_burnin=n_burnin, n_sample=n_sample, seed=99)
-    print(f"  Final: m0 = {m_final:.4f} (p_neu = {p_final:.3f})")
+    print(f"  Final: m_tol = {m_final:.4f} (p_neu = {p_final:.3f})")
     return m_final
 
 
@@ -533,132 +525,50 @@ def run_main_sweep_point(args):
     }
 
 
-def fit_log_slope(t_vals: np.ndarray, p_vals: np.ndarray, p_errs: np.ndarray = None) -> Tuple[float, float]:
-    """
-    Fit log(p) = a * log(t) + b.
-    Returns (slope, slope_stderr).
-    """
-    # Filter out zeros and nans
-    valid = (p_vals > 0) & np.isfinite(p_vals) & (t_vals > 0)
-    t_valid = t_vals[valid]
-    p_valid = p_vals[valid]
-
-    if len(t_valid) < 3:
-        return np.nan, np.nan
-
-    log_t = np.log(t_valid)
-    log_p = np.log(p_valid)
-
-    # Simple linear regression
-    n = len(log_t)
-    sum_x = np.sum(log_t)
-    sum_y = np.sum(log_p)
-    sum_xx = np.sum(log_t**2)
-    sum_xy = np.sum(log_t * log_p)
-
-    denom = n * sum_xx - sum_x**2
-    if abs(denom) < 1e-12:
-        return np.nan, np.nan
-
-    slope = (n * sum_xy - sum_x * sum_y) / denom
-    intercept = (sum_y - slope * sum_x) / n
-
-    # Residual variance for error estimate
-    residuals = log_p - (slope * log_t + intercept)
-    s2 = np.sum(residuals**2) / (n - 2) if n > 2 else np.nan
-    slope_stderr = np.sqrt(s2 * n / denom) if np.isfinite(s2) else np.nan
-
-    return slope, slope_stderr
-
-
-def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0: float,
-                   slopes: Dict, output_dir: str = "."):
+def create_figures(results: List[Dict], kappa_values: List[float], delta: float, output_dir: str = "."):
     """Create the 4 required figures."""
 
-    t_arr = np.array(t_values)
+    kappa_arr = np.array(kappa_values)
     p_geo_arr = np.array([r['p_geo'] for r in results])
     p_neu_arr = np.array([r['p_neu'] for r in results])
     p_both_arr = np.array([r['p_both'] for r in results])
     rho_arr = np.array([r['rho'] for r in results])
+    stderr_geo_arr = np.array([r['stderr_geo'] for r in results])
+    stderr_neu_arr = np.array([r['stderr_neu'] for r in results])
+    stderr_both_arr = np.array([r['stderr_both'] for r in results])
     stderr_rho_arr = np.array([r['stderr_rho'] for r in results])
 
-    # Filter for included points (not saturated)
-    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.6) & \
-               (p_neu_arr > 0.02) & (p_neu_arr < 0.6) & \
-               (p_both_arr > 0.02) & (p_both_arr < 0.6)
+    saturated = np.array([r['saturated'] for r in results], dtype=bool)
 
-    t_inc = t_arr[included]
-    p_geo_inc = p_geo_arr[included]
-    p_neu_inc = p_neu_arr[included]
-    p_both_inc = p_both_arr[included]
-
-    # 1.png: Log-log plot
+    # 1.png: p_geo, p_neu, p_both vs κ
     plt.figure(figsize=(10, 7))
-
-    # Plot all points
-    plt.loglog(t_arr, p_geo_arr, 'bo', markersize=8, label='p_geo (all)', alpha=0.5)
-    plt.loglog(t_arr, p_neu_arr, 'gs', markersize=8, label='p_neu (all)', alpha=0.5)
-    plt.loglog(t_arr, p_both_arr, 'r^', markersize=8, label='p_both (all)', alpha=0.5)
-
-    # Highlight included points
-    plt.loglog(t_inc, p_geo_inc, 'bo', markersize=12, markeredgecolor='black', markeredgewidth=2)
-    plt.loglog(t_inc, p_neu_inc, 'gs', markersize=12, markeredgecolor='black', markeredgewidth=2)
-    plt.loglog(t_inc, p_both_inc, 'r^', markersize=12, markeredgecolor='black', markeredgewidth=2)
-
-    # Fitted lines (for included points only)
-    if len(t_inc) >= 3:
-        t_fit = np.linspace(t_inc.min(), t_inc.max(), 100)
-
-        a, a_err = slopes['a'], slopes['a_err']
-        b, b_err = slopes['b'], slopes['b_err']
-        c, c_err = slopes['c'], slopes['c_err']
-
-        if np.isfinite(a):
-            # Fit intercept from first included point
-            log_p_geo_0 = np.log(p_geo_inc[0]) - a * np.log(t_inc[0])
-            p_geo_fit = np.exp(a * np.log(t_fit) + log_p_geo_0)
-            plt.loglog(t_fit, p_geo_fit, 'b--', linewidth=2, label=f'a={a:.2f}±{a_err:.2f}')
-
-        if np.isfinite(b):
-            log_p_neu_0 = np.log(p_neu_inc[0]) - b * np.log(t_inc[0])
-            p_neu_fit = np.exp(b * np.log(t_fit) + log_p_neu_0)
-            plt.loglog(t_fit, p_neu_fit, 'g--', linewidth=2, label=f'b={b:.2f}±{b_err:.2f}')
-
-        if np.isfinite(c):
-            log_p_both_0 = np.log(p_both_inc[0]) - c * np.log(t_inc[0])
-            p_both_fit = np.exp(c * np.log(t_fit) + log_p_both_0)
-            plt.loglog(t_fit, p_both_fit, 'r--', linewidth=2, label=f'c={c:.2f}±{c_err:.2f}')
-
-    plt.xlabel('t (threshold scale)', fontsize=14)
+    plt.errorbar(kappa_arr, p_geo_arr, yerr=stderr_geo_arr, fmt='bo-', label='p_geo', capsize=4)
+    plt.errorbar(kappa_arr, p_neu_arr, yerr=stderr_neu_arr, fmt='gs-', label='p_neu', capsize=4)
+    plt.errorbar(kappa_arr, p_both_arr, yerr=stderr_both_arr, fmt='r^-', label='p_both', capsize=4)
+    plt.xlabel('κ', fontsize=14)
     plt.ylabel('Probability', fontsize=14)
-    plt.title(f'Log-Log Gate Probabilities (δ₀={delta0:.3f}, m₀={m0:.3f})', fontsize=14)
-    plt.legend(loc='lower right', fontsize=11)
-    plt.grid(True, alpha=0.3, which='both')
+    plt.title(f'Gate Probabilities vs κ (δ={delta:.3f})', fontsize=14)
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f'{output_dir}/1.png', dpi=150)
     plt.close()
     print(f"Saved: {output_dir}/1.png")
 
-    # 2.png: rho(t) vs t
+    # 2.png: rho vs κ
     plt.figure(figsize=(10, 6))
-
     valid_rho = np.isfinite(rho_arr)
     valid_err = np.isfinite(stderr_rho_arr)
-
-    t_plot = t_arr[valid_rho]
+    kappa_plot = kappa_arr[valid_rho]
     rho_plot = rho_arr[valid_rho]
     err_plot = np.where(valid_err[valid_rho], stderr_rho_arr[valid_rho], 0)
 
-    plt.errorbar(t_plot, rho_plot, yerr=err_plot, fmt='ko-', markersize=10,
-                 linewidth=2, capsize=5, capthick=2, label='ρ(t)')
+    plt.errorbar(kappa_plot, rho_plot, yerr=err_plot, fmt='ko-', markersize=8,
+                 linewidth=2, capsize=4, capthick=1.5, label='ρ(κ)')
     plt.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='ρ=1 (independence)')
-    plt.fill_between([0, 1.1], 0.95, 1.05, alpha=0.2, color='green', label='±5% band')
-
-    plt.xlabel('t (threshold scale)', fontsize=14)
+    plt.xlabel('κ', fontsize=14)
     plt.ylabel('ρ = p_both / (p_geo × p_neu)', fontsize=14)
-    plt.title('Gate Correlation Ratio vs Threshold Scale', fontsize=14)
-    plt.xlim(0, 1.05)
-    plt.ylim(0.5, 1.5)
+    plt.title('Gate Correlation Ratio vs κ', fontsize=14)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -668,15 +578,13 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
 
     # 3.png: Scatter p_both vs p_geo*p_neu
     plt.figure(figsize=(8, 8))
-
     products = p_geo_arr * p_neu_arr
     valid = np.isfinite(products) & np.isfinite(p_both_arr) & (products > 0)
 
     if np.any(valid):
-        plt.scatter(products[valid], p_both_arr[valid], c=t_arr[valid], cmap='viridis',
-                    s=150, edgecolors='black', linewidths=1.5)
-        plt.colorbar(label='t')
-
+        plt.scatter(products[valid], p_both_arr[valid], c=kappa_arr[valid], cmap='viridis',
+                    s=140, edgecolors='black', linewidths=1.2)
+        plt.colorbar(label='κ')
         max_val = max(np.max(products[valid]), np.max(p_both_arr[valid])) * 1.1
         plt.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x (independence)')
     else:
@@ -686,7 +594,7 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
 
     plt.xlabel('p_geo × p_neu', fontsize=14)
     plt.ylabel('p_both', fontsize=14)
-    plt.title('Gate Independence Test (color = t)', fontsize=14)
+    plt.title('Gate Independence Test (color = κ)', fontsize=14)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.axis('equal')
@@ -697,65 +605,36 @@ def create_figures(results: List[Dict], t_values: List[float], delta0: float, m0
     plt.close()
     print(f"Saved: {output_dir}/3.png")
 
-    # 4.png: Summary panel
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.axis('off')
+    # 4.png: Matched-square test
+    epsilon = (p_geo_arr + p_neu_arr) / 2
+    eps_sq = epsilon**2
+    fit_mask = (~saturated) & np.isfinite(eps_sq) & np.isfinite(p_both_arr)
 
-    a, a_err = slopes['a'], slopes['a_err']
-    b, b_err = slopes['b'], slopes['b_err']
-    c, c_err = slopes['c'], slopes['c_err']
+    plt.figure(figsize=(10, 7))
+    plt.scatter(eps_sq, p_both_arr, c=kappa_arr, cmap='plasma',
+                s=140, edgecolors='black', linewidths=1.2)
+    plt.colorbar(label='κ')
 
-    if np.isfinite(a) and np.isfinite(b) and np.isfinite(c):
-        diff = c - (a + b)
-        diff_err = np.sqrt(a_err**2 + b_err**2 + c_err**2)
-    else:
-        diff = np.nan
-        diff_err = np.nan
+    if np.sum(fit_mask) >= 2:
+        coeff = np.polyfit(eps_sq[fit_mask], p_both_arr[fit_mask], 1)
+        fit_line = np.poly1d(coeff)
+        x_fit = np.linspace(0, np.max(eps_sq[fit_mask]) * 1.05, 100)
+        plt.plot(x_fit, fit_line(x_fit), 'k--', linewidth=2,
+                 label=f'fit: y={coeff[0]:.2f}x+{coeff[1]:.3f}')
 
-    # Mean rho for included points
-    rho_inc = rho_arr[included]
-    rho_inc = rho_inc[np.isfinite(rho_inc)]
-    if len(rho_inc) > 0:
-        mean_rho = np.mean(rho_inc)
-        stderr_mean_rho = np.std(rho_inc) / np.sqrt(len(rho_inc))
-    else:
-        mean_rho = np.nan
-        stderr_mean_rho = np.nan
+    plt.xlabel('ε² where ε=(p_geo+p_neu)/2', fontsize=14)
+    plt.ylabel('p_both', fontsize=14)
+    plt.title('Matched-square test', fontsize=14)
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
 
-    n_included = np.sum(included)
-
-    summary_text = f"""
-╔══════════════════════════════════════════════════════════════════╗
-║                   CLEAN EXPONENT TEST SUMMARY                    ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Calibrated Parameters:                                          ║
-║    δ₀ = {delta0:.4f}                                              ║
-║    m₀ = {m0:.4f}                                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Fitted Exponents (log p vs log t):                              ║
-║    a (p_geo slope)  = {a:+.3f} ± {a_err:.3f}                       ║
-║    b (p_neu slope)  = {b:+.3f} ± {b_err:.3f}                       ║
-║    c (p_both slope) = {c:+.3f} ± {c_err:.3f}                       ║
-║                                                                  ║
-║    c - (a + b) = {diff:+.3f} ± {diff_err:.3f}                      ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Gate Independence:                                              ║
-║    Mean ρ = {mean_rho:.3f} ± {stderr_mean_rho:.3f}                 ║
-║    (ρ = 1 indicates independence)                                ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Data Quality:                                                   ║
-║    Total points: {len(t_values)}                                  ║
-║    Included in fit: {n_included} (0.02 < p < 0.60 for all gates)  ║
-╠══════════════════════════════════════════════════════════════════╣
-║  INTERPRETATION:                                                 ║
-║    Multiplicativity: {"SUPPORTED" if np.isfinite(diff) and abs(diff) < 2*diff_err else "UNCLEAR"}  (c ≈ a + b?)           ║
-║    Independence:     {"SUPPORTED" if np.isfinite(mean_rho) and abs(mean_rho - 1) < 0.1 else "UNCLEAR"}  (ρ ≈ 1?)              ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-
-    ax.text(0.5, 0.5, summary_text, transform=ax.transAxes, fontsize=11,
-            verticalalignment='center', horizontalalignment='center',
-            fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='white', edgecolor='gray'))
+    inset = plt.axes([0.62, 0.15, 0.3, 0.3])
+    ratio = np.where(eps_sq > 0, p_both_arr / eps_sq, np.nan)
+    inset.plot(kappa_arr, ratio, 'o-', color='tab:purple', markersize=4)
+    inset.axhline(1.0, color='gray', linestyle='--', linewidth=1)
+    inset.set_xlabel('κ', fontsize=9)
+    inset.set_ylabel('p_both/ε²', fontsize=9)
+    inset.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(f'{output_dir}/4.png', dpi=150)
@@ -778,32 +657,28 @@ def main():
     start_time = time.time()
 
     # Base parameters
-    # NOTE: For 2D Ising, T_c = 2J/ln(1+sqrt(2)) ≈ 2.27*J
-    # We need T > T_c for magnetization fluctuations around m=0
-    # With J=0.4, T_c ≈ 0.91, so T=2.0 gives T/T_c ≈ 2.2 (paramagnetic)
     params = SimulationParams(
-        L=16, T=2.5, J=0.35, h=0.0,
+        L=24, T=1.0, J=0.6, h=0.0,
         kappa=50.0, g=0.5,
-        mu=1.0, gamma=0.2, sigma=1.0,
+        mu=1.0, gamma=0.5, sigma=1.0,
         dtheta=0.6,
-        n_burnin=200, n_sample=800, n_batches=10
+        n_burnin=400, n_sample=1600, n_batches=20
     )
 
-    t_values = [0.20, 0.35, 0.50, 0.70, 0.85, 1.00]  # 6 points for quick test
+    kappa_list = [10, 15, 20, 30, 40, 50, 65, 80, 100]
 
     if args.smoke_test:
         params.L = 8
         params.n_burnin = 50
         params.n_sample = 100
         params.n_batches = 10
-        t_values = [0.50, 1.00]
+        kappa_list = [30, 50]
 
     print(f"\nBase parameters:")
-    print(f"  L={params.L}, T={params.T}, J={params.J}, kappa={params.kappa}, g={params.g}")
+    print(f"  L={params.L}, T={params.T}, J={params.J}, g={params.g}")
     print(f"  mu={params.mu}, gamma={params.gamma}, sigma={params.sigma}")
 
     # Target probability for calibration
-    # Use 0.2 for dynamic range in log space during threshold shrinking
     target_p = 0.2
 
     # ========== CALIBRATION ==========
@@ -811,54 +686,55 @@ def main():
     print("PHASE 1: CALIBRATION")
     print("=" * 70)
 
-    # Initial guesses
-    delta0_init = 0.4
-    m0_init = 0.10
+    # Calibrate δ using κ_ref=50
+    kappa_ref = 50
+    params_ref = replace(params, kappa=kappa_ref)
+    delta = calibrate_delta(params_ref, m_tol=0.1, target_p=target_p,
+                            n_burnin=200 if not args.smoke_test else params.n_burnin,
+                            n_sample=600 if not args.smoke_test else params.n_sample)
 
-    # Calibrate δ0 (keeping m0 fixed at initial)
-    delta0 = calibrate_delta(params, m0_init, target_p=target_p)
-
-    # Calibrate m0 (keeping δ0 fixed at calibrated value)
-    m0 = calibrate_m_tol(params, delta0, target_p=target_p)
-
-    # Verify calibration
-    print("\n  Verifying calibration at t=1...")
-    p_geo_cal, p_neu_cal = run_calibration_point(params, delta0, m0, n_burnin=200, n_sample=600, seed=999)
-    print(f"  Verified: p_geo = {p_geo_cal:.3f}, p_neu = {p_neu_cal:.3f}")
-
-    # Check if calibration is acceptable
-    if p_geo_cal < 0.1 or p_neu_cal < 0.1:
-        print("\n  WARNING: Probabilities very low, results may be unreliable...")
-
-    print(f"\n  FINAL CALIBRATION: δ0 = {delta0:.4f}, m0 = {m0:.4f}")
+    print(f"\n  FINAL CALIBRATION: δ = {delta:.4f} (κ_ref={kappa_ref})")
 
     # ========== MAIN SWEEP ==========
     print("\n" + "=" * 70)
     print("PHASE 2: MAIN SWEEP")
     print("=" * 70)
 
-    print(f"\n  Running {len(t_values)} t-values with {params.n_sample} samples each...")
-    print(f"  (burn-in: {params.n_burnin}, batches: {params.n_batches})")
+    print(f"\n  Running κ sweep with {len(kappa_list)} values...")
+    print(f"  (burn-in: {params.n_burnin}, samples: {params.n_sample}, batches: {params.n_batches})")
 
-    # Prepare parallel jobs
     jobs = []
-    for i, t in enumerate(t_values):
-        delta_t = delta0 * t
-        m_tol_t = m0 * t
-        jobs.append((params, delta_t, m_tol_t, 1000 + i))
+    m_tol_map = {}
 
-    # Run in parallel
-    n_workers = min(len(t_values), cpu_count())
-    print(f"  Using {n_workers} parallel workers...")
+    for i, kappa in enumerate(kappa_list):
+        params_k = replace(params, kappa=kappa)
+        p_geo_est, _ = run_calibration_point(
+            params_k, delta, m_tol=0.1,
+            n_burnin=200 if not args.smoke_test else params.n_burnin,
+            n_sample=600 if not args.smoke_test else params.n_sample,
+            seed=100 + i
+        )
+        target_p_neu = float(np.clip(p_geo_est, 0.05, 0.5))
+        print(f"\n  κ={kappa:.1f}: p_geo≈{p_geo_est:.3f} => target p_neu={target_p_neu:.3f}")
+        m_tol = calibrate_m_tol(
+            params_k, delta, target_p=target_p_neu,
+            n_burnin=200 if not args.smoke_test else params.n_burnin,
+            n_sample=600 if not args.smoke_test else params.n_sample
+        )
+        m_tol_map[kappa] = m_tol
+        jobs.append((params_k, delta, m_tol, 1000 + i))
+
+    n_workers = min(len(kappa_list), cpu_count())
+    print(f"\n  Using {n_workers} parallel workers...")
 
     with Pool(n_workers) as pool:
         results = pool.map(run_main_sweep_point, jobs)
 
-    # Add t, delta, m_tol to results
-    for i, (t, result) in enumerate(zip(t_values, results)):
-        result['t'] = t
-        result['delta'] = delta0 * t
-        result['m_tol'] = m0 * t
+    for kappa, result in zip(kappa_list, results):
+        result['kappa'] = kappa
+        result['delta'] = delta
+        result['m_tol'] = m_tol_map[kappa]
+        result['saturated'] = (result['p_geo'] < 0.02) or (result['p_geo'] > 0.98)
 
     # ========== ANALYSIS ==========
     print("\n" + "=" * 70)
@@ -867,90 +743,31 @@ def main():
 
     # Print table
     print("\n  Results table:")
-    print("  " + "-" * 90)
-    print(f"  {'t':>6} | {'δ':>6} | {'m_tol':>6} | {'p_geo':>7} | {'p_neu':>7} | {'p_both':>7} | {'ρ':>7} | {'included':>8}")
-    print("  " + "-" * 90)
+    print("  " + "-" * 110)
+    print(f"  {'κ':>6} | {'δ':>6} | {'m_tol':>6} | {'p_geo':>7} | {'p_neu':>7} | "
+          f"{'p_both':>7} | {'ρ':>7} | {'sat':>5}")
+    print("  " + "-" * 110)
 
-    t_arr = np.array(t_values)
     p_geo_arr = np.array([r['p_geo'] for r in results])
     p_neu_arr = np.array([r['p_neu'] for r in results])
     p_both_arr = np.array([r['p_both'] for r in results])
+    rho_arr = np.array([r['rho'] for r in results])
 
     for r in results:
-        inc = "yes" if (0.02 < r['p_geo'] < 0.6 and
-                        0.02 < r['p_neu'] < 0.6 and
-                        0.02 < r['p_both'] < 0.6) else "no"
         rho_str = f"{r['rho']:.3f}" if np.isfinite(r['rho']) else "nan"
-        print(f"  {r['t']:>6.2f} | {r['delta']:>6.4f} | {r['m_tol']:>6.4f} | "
+        sat_str = "yes" if r['saturated'] else "no"
+        print(f"  {r['kappa']:>6.1f} | {r['delta']:>6.4f} | {r['m_tol']:>6.4f} | "
               f"{r['p_geo']:>7.4f} | {r['p_neu']:>7.4f} | {r['p_both']:>7.4f} | "
-              f"{rho_str:>7} | {inc:>8}")
+              f"{rho_str:>7} | {sat_str:>5}")
 
-    print("  " + "-" * 90)
+    print("  " + "-" * 110)
 
-    # Filter for slope fitting
-    included = (p_geo_arr > 0.02) & (p_geo_arr < 0.6) & \
-               (p_neu_arr > 0.02) & (p_neu_arr < 0.6) & \
-               (p_both_arr > 0.02) & (p_both_arr < 0.6)
-
-    n_included = np.sum(included)
-    print(f"\n  Points included in fit: {n_included} / {len(t_values)}")
-
-    if n_included < 7:
-        print("  WARNING: Fewer than 7 points included. Results may be unreliable.")
-
-    # Compute slopes
-    t_inc = t_arr[included]
-    p_geo_inc = p_geo_arr[included]
-    p_neu_inc = p_neu_arr[included]
-    p_both_inc = p_both_arr[included]
-
-    a, a_err = fit_log_slope(t_inc, p_geo_inc)
-    b, b_err = fit_log_slope(t_inc, p_neu_inc)
-    c, c_err = fit_log_slope(t_inc, p_both_inc)
-
-    slopes = {'a': a, 'a_err': a_err, 'b': b, 'b_err': b_err, 'c': c, 'c_err': c_err}
-
-    print(f"\n  Fitted exponents:")
-    print(f"    a (p_geo slope)  = {a:.3f} ± {a_err:.3f}")
-    print(f"    b (p_neu slope)  = {b:.3f} ± {b_err:.3f}")
-    print(f"    c (p_both slope) = {c:.3f} ± {c_err:.3f}")
-
-    if np.isfinite(a) and np.isfinite(b) and np.isfinite(c):
-        diff = c - (a + b)
-        diff_err = np.sqrt(a_err**2 + b_err**2 + c_err**2)
-        print(f"\n    c - (a + b) = {diff:.3f} ± {diff_err:.3f}")
-
-        if abs(diff) < 2 * diff_err:
-            print("    => Consistent with multiplicativity (c ≈ a + b)")
-        else:
-            print("    => Deviation from multiplicativity")
-
-    # Mean rho
-    rho_arr = np.array([r['rho'] for r in results])
-    rho_inc = rho_arr[included]
-    rho_inc = rho_inc[np.isfinite(rho_inc)]
-
-    if len(rho_inc) > 0:
-        mean_rho = np.mean(rho_inc)
-        stderr_rho = np.std(rho_inc) / np.sqrt(len(rho_inc))
-        print(f"\n  Mean ρ across included points: {mean_rho:.3f} ± {stderr_rho:.3f}")
-
-        if abs(mean_rho - 1.0) < 0.1:
-            print("    => Consistent with gate independence (ρ ≈ 1)")
-        else:
-            print("    => Deviation from independence")
-
-    def log_phi_stats(results_list: List[Dict], t_target: float):
-        for res in results_list:
-            if np.isclose(res['t'], t_target, atol=1e-8):
-                print(f"\n  |Phi| stats at t={t_target:.2f}:")
-                print(f"    median = {res['mean_phi_median']:.4f}")
-                print(f"    q95    = {res['mean_phi_q95']:.4f}")
-                print(f"    max    = {res['mean_phi_max']:.4f}")
-                return
-
-    log_phi_stats(results, 1.0)
-    log_phi_stats(results, 0.2)
+    valid_rho = np.isfinite(rho_arr)
+    rho_valid = rho_arr[valid_rho]
+    if len(rho_valid) > 0:
+        mean_rho = np.mean(rho_valid)
+        stderr_rho = np.std(rho_valid) / np.sqrt(len(rho_valid))
+        print(f"\n  Mean ρ across κ: {mean_rho:.3f} ± {stderr_rho:.3f}")
 
     # ========== OUTPUT FILES ==========
     print("\n" + "=" * 70)
@@ -960,14 +777,14 @@ def main():
     # Save CSV
     csv_filename = "clean_exponent_results.csv"
     with open(csv_filename, 'w', newline='') as f:
-        fieldnames = ['t', 'delta', 'm_tol', 'p_geo', 'p_neu', 'p_both', 'rho',
+        fieldnames = ['kappa', 'delta', 'm_tol', 'p_geo', 'p_neu', 'p_both', 'rho',
                       'stderr_p_geo', 'stderr_p_neu', 'stderr_p_both', 'stderr_rho',
-                      'accept_spin', 'accept_theta', 'mean_abs_phi', 'mean_m']
+                      'accept_spin', 'accept_theta', 'mean_abs_phi', 'mean_m', 'saturated']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
             writer.writerow({
-                't': r['t'],
+                'kappa': r['kappa'],
                 'delta': r['delta'],
                 'm_tol': r['m_tol'],
                 'p_geo': r['p_geo'],
@@ -982,11 +799,12 @@ def main():
                 'accept_theta': r['accept_theta'],
                 'mean_abs_phi': r['mean_phi'],
                 'mean_m': r['mean_m'],
+                'saturated': r['saturated'],
             })
     print(f"  Saved: {csv_filename}")
 
     # Create figures
-    create_figures(results, t_values, delta0, m0, slopes, output_dir=".")
+    create_figures(results, kappa_list, delta, output_dir=".")
 
     # ========== FINAL REPORT ==========
     elapsed = time.time() - start_time
@@ -994,44 +812,15 @@ def main():
     print("FINAL REPORT")
     print("=" * 70)
 
-    print(f"\n  Calibrated thresholds:")
-    print(f"    δ0 = {delta0:.4f}")
-    print(f"    m0 = {m0:.4f}")
-    print(f"    Achieved at t=1: p_geo = {p_geo_cal:.3f}, p_neu = {p_neu_cal:.3f}")
+    print(f"\n  Calibrated threshold:")
+    print(f"    δ = {delta:.4f} (κ_ref={kappa_ref})")
 
-    print(f"\n  Exponents:")
-    print(f"    a = {a:.3f} ± {a_err:.3f}")
-    print(f"    b = {b:.3f} ± {b_err:.3f}")
-    print(f"    c = {c:.3f} ± {c_err:.3f}")
-
-    if np.isfinite(a) and np.isfinite(b) and np.isfinite(c):
-        diff = c - (a + b)
-        diff_err = np.sqrt(a_err**2 + b_err**2 + c_err**2)
-        print(f"    c - (a + b) = {diff:.3f} ± {diff_err:.3f}")
-
-    if len(rho_inc) > 0:
+    if len(rho_valid) > 0:
         print(f"\n  Gate independence:")
         print(f"    Mean ρ = {mean_rho:.3f} ± {stderr_rho:.3f}")
 
     print(f"\n  Data quality:")
-    print(f"    Total points: {len(t_values)}")
-    print(f"    Included in fit: {n_included}")
-
-    print(f"\n  CONCLUSIONS:")
-    if np.isfinite(a) and np.isfinite(b) and np.isfinite(c):
-        diff = c - (a + b)
-        diff_err = np.sqrt(a_err**2 + b_err**2 + c_err**2)
-        if abs(diff) < 2 * diff_err:
-            print("    ✓ Multiplicativity SUPPORTED (c ≈ a + b within 2σ)")
-        else:
-            print("    ✗ Multiplicativity unclear or violated")
-    else:
-        print("    ✗ Multiplicativity: insufficient data for exponent fits")
-
-    if len(rho_inc) > 0 and abs(mean_rho - 1.0) < 0.1:
-        print("    ✓ Gate independence SUPPORTED (ρ ≈ 1)")
-    else:
-        print("    ✗ Gate independence unclear or violated")
+    print(f"    Total κ points: {len(kappa_list)}")
 
     print(f"\n  Total runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print("=" * 70)
@@ -1040,7 +829,7 @@ def main():
         print("\nSmoke test summary:")
         for res in results:
             rho_str = f"{res['rho']:.3f}" if np.isfinite(res['rho']) else "nan"
-            print(f"  t={res['t']:.2f}: p_geo={res['p_geo']:.4f}, "
+            print(f"  κ={res['kappa']:.1f}: p_geo={res['p_geo']:.4f}, "
                   f"p_neu={res['p_neu']:.4f}, p_both={res['p_both']:.4f}, rho={rho_str}")
 
 
