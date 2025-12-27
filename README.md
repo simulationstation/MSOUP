@@ -1,14 +1,65 @@
-# Msoup Closure Model Pipeline
+# MSOUP: Multiscale Structure and Observability Universality Project
+
+## Two-Gate Interface Model Simulation (Primary)
+
+Monte Carlo simulation testing the CSF/MVerse "two-gate" interface model for gate independence/multiplicative suppression.
+
+### Model Overview
+
+Simulates coupled dynamics on a 2D periodic square lattice:
+- **Ising spins** s_i in {+1, -1} - represents matter configuration
+- **Edge phases** theta_ij in (-pi, pi] - U(1) gauge field (holonomy)
+- **Credit field** c_i in R - explicit eta surrogate (observability)
+
+The simulation tests whether two gate observables are statistically independent:
+- **Geometric gate** G_geo = 1 iff max|Phi_C| <= delta (holonomy closure)
+- **Neutrality gate** G_neu = 1 iff |m| <= m_tol (magnetization near zero)
+
+Key metric: **rho = p_both / (p_geo * p_neu)**
+- rho ~ 1 indicates gate independence (multiplicativity)
+- rho != 1 indicates gate correlation
+
+### Quick Start
+
+```bash
+# Requirements: Python 3, numpy, matplotlib (no external physics libs)
+
+# Run full simulation with parameter sweeps
+python two_gate_simulation.py
+
+# Outputs saved to results/two_gate_sim/:
+#   - 1.png: rho vs kappa (holonomy strength)
+#   - 2.png: p_both vs (p_geo * p_neu) scatter
+#   - 3.png: rho heatmap over (kappa, g) plane
+#   - 4.png: |Phi| and m distributions
+#   - results.csv: all parameter combinations and gate probabilities
+```
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| L | 16 | Lattice size (L x L) |
+| T | 4.0 | Temperature |
+| J | 0.3 | Ising coupling |
+| kappa | 50.0 | Holonomy closure strength |
+| g | 0.5 | Spin-phase coupling |
+| delta | 1.0 | Geometric gate threshold |
+| m_tol | 0.10 | Neutrality gate threshold |
+
+---
+
+## Msoup Closure Model Pipeline (Secondary)
 
 A reproducible Python pipeline to test the constrained "Msoup + observability horizon" effective model for small-scale matter-structure anomalies.
 
-## Overview
+### Overview
 
 This pipeline tests whether a minimal 4-parameter model can simultaneously:
 - **Improve fits** to dwarf/LSB galaxy rotation curves (addressing cusp-core problem)
 - **Not violate** strong-lensing substructure constraints
 
-## Quick Start
+### Quick Start
 
 ```bash
 # Install dependencies

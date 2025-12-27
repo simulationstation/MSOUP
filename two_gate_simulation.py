@@ -32,20 +32,20 @@ def wrap_angle(angle: float) -> float:
 @dataclass
 class SimulationParams:
     """All simulation parameters."""
-    L: int = 24              # Lattice size
-    T: float = 1.0           # Temperature
-    J: float = 0.6           # Ising coupling
+    L: int = 16              # Lattice size (reduced for speed)
+    T: float = 4.0           # Temperature (high enough for spin fluctuations)
+    J: float = 0.3           # Ising coupling (weak for fluctuating magnetization)
     h: float = 0.0           # External field
-    kappa: float = 1.0       # Holonomy closure strength
-    g: float = 1.0           # Spin-phase coupling
+    kappa: float = 50.0      # Holonomy closure strength (high for small holonomies)
+    g: float = 0.5           # Spin-phase coupling
     mu: float = 1.0          # Credit-spin coupling
     gamma: float = 0.5       # Credit-holonomy coupling
     sigma: float = 1.0       # Credit field variance scale
-    dtheta: float = 0.6      # Phase update step
-    delta: float = 0.4       # Geometric gate tolerance
-    m_tol: float = 0.1       # Neutrality gate tolerance
-    n_burnin: int = 200      # Burn-in sweeps
-    n_sample: int = 800      # Sampling sweeps
+    dtheta: float = 0.3      # Phase update step
+    delta: float = 1.0       # Geometric gate tolerance (based on max|Φ| distribution)
+    m_tol: float = 0.10      # Neutrality gate tolerance
+    n_burnin: int = 300      # Burn-in sweeps
+    n_sample: int = 600      # Sampling sweeps
     n_batches: int = 20      # Number of batches for error estimation
 
     @property
@@ -644,15 +644,45 @@ def validate_sampler(params: SimulationParams, seed: int = 123):
     Validation checks:
     1. Compare explicit-c sampler vs integrated-out energy
     2. Check acceptance rates
+    3. Diagnostic output for delta_H values
     """
     print("\n=== Validation Checks ===")
+    print(f"Parameters: T={params.T}, J={params.J}, kappa={params.kappa}, g={params.g}")
 
     rng = np.random.default_rng(seed)
     lattice = TwoGateLattice(params, rng)
 
     # Burn-in
+    print("Running 100 burn-in sweeps...")
     for _ in range(100):
         lattice.sweep()
+
+    # Diagnostic: credit field statistics
+    print(f"\nCredit field statistics:")
+    print(f"  mean(|c|) = {np.mean(np.abs(lattice.credits)):.4f}")
+    print(f"  max(|c|) = {np.max(np.abs(lattice.credits)):.4f}")
+    print(f"  std(c) = {np.std(lattice.credits):.4f}")
+
+    # Diagnostic: q_i statistics
+    print(f"\nHolonomy q_i statistics:")
+    print(f"  mean(q) = {np.mean(lattice._q_cache):.4f}")
+    print(f"  max(q) = {np.max(lattice._q_cache):.4f}")
+
+    # Diagnostic: spin and magnetization
+    m = np.mean(lattice.spins)
+    print(f"\nMagnetization: m = {m:.4f}")
+
+    # Sample delta_H values for spin flips
+    delta_Hs = []
+    for site in rng.choice(lattice.N, size=min(200, lattice.N), replace=False):
+        delta_Hs.append(lattice.delta_H_spin_flip(site))
+
+    delta_Hs = np.array(delta_Hs)
+    print(f"\nDelta_H for spin flips (200 samples):")
+    print(f"  min = {np.min(delta_Hs):.4f}")
+    print(f"  median = {np.median(delta_Hs):.4f}")
+    print(f"  max = {np.max(delta_Hs):.4f}")
+    print(f"  mean = {np.mean(delta_Hs):.4f}")
 
     # Compare H_c vs H_c_eff at optimal c
     H_c_explicit = lattice.H_c()
@@ -667,10 +697,16 @@ def validate_sampler(params: SimulationParams, seed: int = 123):
     H_c_at_optimal = lattice.H_c()
     H_c_eff = lattice.H_c_effective()
 
-    print(f"H_c (explicit, random c): {H_c_explicit:.4f}")
-    print(f"H_c (at c=c*): {H_c_at_optimal:.4f}")
-    print(f"H_c_eff (integrated out): {H_c_eff:.4f}")
-    print(f"Difference at c*: {abs(H_c_at_optimal - H_c_eff):.6f}")
+    print(f"\nEnergy comparisons:")
+    print(f"  H_c (explicit, random c): {H_c_explicit:.4f}")
+    print(f"  H_c (at c=c*): {H_c_at_optimal:.4f}")
+    print(f"  H_c_eff (integrated out): {H_c_eff:.4f}")
+    print(f"  Difference at c*: {abs(H_c_at_optimal - H_c_eff):.6f}")
+
+    # Check Gibbs variance
+    expected_var = params.sigma**2 * params.T
+    print(f"\nGibbs sampling check:")
+    print(f"  Expected c variance: sigma^2 * T = {expected_var:.4f}")
 
     # Restore credits
     lattice.credits = old_credits
@@ -909,7 +945,7 @@ def main():
     print("\n" + "=" * 60)
     print("SWEEP 1: Varying κ (holonomy closure strength)")
     print("=" * 60)
-    kappa_values = [0.2, 0.5, 1.0, 2.0, 4.0]
+    kappa_values = [20.0, 35.0, 50.0, 75.0, 100.0]
     all_results['kappa_sweep'] = run_parameter_sweep(base_params, 'kappa', kappa_values)
 
     # Sweep 2: g
@@ -925,8 +961,8 @@ def main():
     print("=" * 60)
 
     threshold_results = []
-    delta_values = [0.2, 0.4, 0.6]
-    m_tol_values = [0.05, 0.1, 0.2]
+    delta_values = [0.8, 1.0, 1.2]
+    m_tol_values = [0.08, 0.12, 0.18]
 
     for delta in delta_values:
         for m_tol in m_tol_values:
@@ -952,7 +988,7 @@ def main():
     print("Generating (κ, g) heatmap data...")
     print("=" * 60)
 
-    kappa_hm = [0.5, 1.0, 2.0]
+    kappa_hm = [30.0, 50.0, 75.0]
     g_hm = [0.0, 0.5, 1.0, 2.0]
     rho_grid = np.zeros((len(kappa_hm), len(g_hm)))
 
@@ -972,14 +1008,19 @@ def main():
         'rho_grid': rho_grid
     }
 
+    # Create output directory
+    import os
+    output_dir = 'results/two_gate_sim'
+    os.makedirs(output_dir, exist_ok=True)
+
     # Create figures
     print("\n" + "=" * 60)
     print("Creating figures...")
     print("=" * 60)
-    create_figures(all_results)
+    create_figures(all_results, output_dir)
 
     # Save results
-    save_results_csv(all_results, 'results.csv')
+    save_results_csv(all_results, f'{output_dir}/results.csv')
 
     # Save full results as JSON (excluding large arrays)
     json_results = {}
@@ -998,9 +1039,9 @@ def main():
                     'mean_phi': float(r['mean_phi']),
                 })
 
-    with open('results.json', 'w') as f:
+    with open(f'{output_dir}/results.json', 'w') as f:
         json.dump(json_results, f, indent=2)
-    print("Saved: results.json")
+    print(f"Saved: {output_dir}/results.json")
 
     elapsed = time.time() - start_time
     print(f"\nTotal runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")

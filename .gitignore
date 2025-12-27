@@ -80,6 +80,9 @@ data/
 data_processed/
 data_ignored/
 results/
+# Exception: track two-gate simulation results
+!results/two_gate_sim/
+!results/two_gate_sim/*
 
 # BAO analysis download artifacts
 download.log
