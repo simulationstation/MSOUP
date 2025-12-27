@@ -373,7 +373,7 @@ def _estimate_p_geo(params: SimulationParams, delta: float,
 
 def calibrate_delta(params: SimulationParams, target_p: float, median_q: float,
                     n_burnin: int = 200, n_sample: int = 600,
-                    max_iter: int = 12, seed_base: int = 123) -> Tuple[float, bool]:
+                    max_iter: int = 10, tol: float = 0.02, seed_base: int = 123) -> Tuple[float, bool]:
     """Bisection search to find δ such that p_geo(δ) ≈ target_p."""
     print(f"  Calibrating δ for p_geo ≈ {target_p:.3f} (q_level={params.q_level:.2f})...")
 
@@ -409,19 +409,21 @@ def calibrate_delta(params: SimulationParams, target_p: float, median_q: float,
         delta_mid = 0.5 * (delta_low + delta_high)
         p_mid = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + it)
         print(f"    Iter {it + 1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
+        if abs(p_mid - target_p) < tol:
+            print(f"  Early stop: |p_geo - target| < {tol}")
+            return delta_mid, True
         if p_mid < target_p:
             delta_low = delta_mid
         else:
             delta_high = delta_mid
 
-    p_final = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + 99)
-    print(f"  Final δ={delta_mid:.4f} -> p_geo={p_final:.3f}")
+    print(f"  Final δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
     return delta_mid, True
 
 
 def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float,
                     n_burnin: int = 200, n_sample: int = 600,
-                    max_iter: int = 12, seed_base: int = 321) -> Tuple[float, bool]:
+                    max_iter: int = 10, tol: float = 0.02, seed_base: int = 321) -> Tuple[float, bool]:
     """Bisection search to find m_tol such that p_neu(m_tol) ≈ target_p."""
     print(f"  Calibrating m_tol for p_neu ≈ {target_p:.3f}...")
 
@@ -444,15 +446,15 @@ def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float,
                                          n_burnin=n_burnin, n_sample=n_sample,
                                          seed=seed_base + it)
         print(f"    Iter {it + 1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
+        if abs(p_mid - target_p) < tol:
+            print(f"  Early stop: |p_neu - target| < {tol}")
+            return m_mid, True
         if p_mid < target_p:
             m_low = m_mid
         else:
             m_high = m_mid
 
-    _, p_final = run_calibration_point(params, delta, m_mid,
-                                       n_burnin=n_burnin, n_sample=n_sample,
-                                       seed=seed_base + 99)
-    print(f"  Final m_tol={m_mid:.4f} -> p_neu={p_final:.3f}")
+    print(f"  Final m_tol={m_mid:.4f} -> p_neu={p_mid:.3f}")
     return m_mid, True
 
 
