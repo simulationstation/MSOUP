@@ -663,6 +663,24 @@ def run_epsilon_job_task(task, job_kwargs):
     return run_epsilon_job(eps, idx=idx, **job_kwargs)
 
 
+def run_kappa_feasibility_task(args):
+    """Worker for parallel κ feasibility scan."""
+    kappa, params, cal_burnin, cal_sample, seed_base = args
+    params_k = replace(params, kappa=kappa)
+    stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=200 + int(kappa))
+
+    delta_try, ok = calibrate_delta(params_k, target_p=0.2,
+                                    median_q=stats['median_q_level'],
+                                    n_burnin=cal_burnin, n_sample=cal_sample,
+                                    seed_base=seed_base + int(kappa))
+    return {
+        'kappa': kappa,
+        'stats': stats,
+        'delta': delta_try,
+        'feasible': ok
+    }
+
+
 def create_figures(results: List[Dict], output_dir: str = "."):
     """Create the 4 required figures."""
 
@@ -802,8 +820,8 @@ def main():
         q_level=0.95
     )
 
-    epsilon_targets = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
-    kappa_candidates = [20, 30, 40, 50, 65, 80, 100, 130]
+    epsilon_targets = [0.10, 0.15, 0.20, 0.30, 0.40]
+    kappa_candidates = [20, 30, 40, 50, 65, 80]
     cal_burnin = 200
     cal_sample = 600
     base_seed = 4000
@@ -847,48 +865,53 @@ def main():
 
     # ========== PHASE 2: KAPPA FEASIBILITY SCAN ==========
     print("\n" + "=" * 70)
-    print("PHASE 2: KAPPA FEASIBILITY SCAN")
+    print("PHASE 2: KAPPA FEASIBILITY SCAN (PARALLEL)")
     print("=" * 70)
 
     kappa_stats = {}
     feasible_kappas = []
 
-    for kappa in kappa_candidates:
-        params_k = replace(params, kappa=kappa)
-        stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=200 + int(kappa))
+    cpu_total = os.cpu_count() or 1
+    phase2_processes = min(len(kappa_candidates), max(1, cpu_total - 1))
+    print(f"  Scanning {len(kappa_candidates)} κ values with {phase2_processes} processes...")
+
+    phase2_tasks = [(kappa, params, cal_burnin, cal_sample, 400) for kappa in kappa_candidates]
+
+    with multiprocessing.Pool(processes=phase2_processes) as pool:
+        phase2_results = pool.map(run_kappa_feasibility_task, phase2_tasks)
+
+    for res in sorted(phase2_results, key=lambda x: x['kappa']):
+        kappa = res['kappa']
+        stats = res['stats']
         kappa_stats[kappa] = stats
         print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
               f"q95={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
               f"max={stats['median_max']:.4f}")
-
-        delta_try, ok = calibrate_delta(params_k, target_p=0.2,
-                                        median_q=stats['median_q_level'],
-                                        n_burnin=cal_burnin, n_sample=cal_sample,
-                                        seed_base=400 + int(kappa))
-        if ok:
+        if res['feasible']:
             feasible_kappas.append(kappa)
-            print(f"    Feasible κ={kappa:.1f} with δ≈{delta_try:.4f}")
+            print(f"    Feasible κ={kappa:.1f} with δ≈{res['delta']:.4f}")
         else:
             print(f"    Infeasible κ={kappa:.1f}")
 
     if not feasible_kappas and params.q_level > 0.90:
-        print("\n  No feasible κ found. Relaxing q_level to 0.90 and rescanning once.")
+        print("\n  No feasible κ found. Relaxing q_level to 0.90 and rescanning (parallel)...")
         params = replace(params, q_level=0.90)
         feasible_kappas = []
-        for kappa in kappa_candidates:
-            params_k = replace(params, kappa=kappa)
-            stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=260 + int(kappa))
+
+        phase2_tasks_retry = [(kappa, params, cal_burnin, cal_sample, 460) for kappa in kappa_candidates]
+        with multiprocessing.Pool(processes=phase2_processes) as pool:
+            phase2_results_retry = pool.map(run_kappa_feasibility_task, phase2_tasks_retry)
+
+        for res in sorted(phase2_results_retry, key=lambda x: x['kappa']):
+            kappa = res['kappa']
+            stats = res['stats']
             kappa_stats[kappa] = stats
             print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
                   f"q90={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
                   f"max={stats['median_max']:.4f}")
-            delta_try, ok = calibrate_delta(params_k, target_p=0.2,
-                                            median_q=stats['median_q_level'],
-                                            n_burnin=cal_burnin, n_sample=cal_sample,
-                                            seed_base=460 + int(kappa))
-            if ok:
+            if res['feasible']:
                 feasible_kappas.append(kappa)
-                print(f"    Feasible κ={kappa:.1f} with δ≈{delta_try:.4f}")
+                print(f"    Feasible κ={kappa:.1f} with δ≈{res['delta']:.4f}")
 
     if not feasible_kappas:
         raise RuntimeError("No feasible κ found; cannot proceed with matched-permeability test.")
