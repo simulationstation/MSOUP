@@ -12,7 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Tuple, List, Dict
 import csv
 import time
-from multiprocessing import Pool, cpu_count
 
 
 def wrap_angle(angle: float) -> float:
@@ -35,6 +34,7 @@ class SimulationParams:
     dtheta: float = 0.3
     delta: float = 0.4
     m_tol: float = 0.10
+    q_level: float = 0.95
     n_burnin: int = 400
     n_sample: int = 1600
     n_batches: int = 20
@@ -296,7 +296,7 @@ class TwoGateLattice:
 
     def geometric_gate(self, delta: float) -> bool:
         abs_phi = np.abs(self._phi_cache)
-        q = np.quantile(abs_phi, 0.95)
+        q = np.quantile(abs_phi, self.params.q_level)
         return q <= delta
 
     def neutrality_gate(self, m_tol: float) -> bool:
@@ -326,88 +326,134 @@ def run_calibration_point(params: SimulationParams, delta: float, m_tol: float,
     return g_geo_count / n_sample, g_neu_count / n_sample
 
 
-def calibrate_delta(params: SimulationParams, m_tol: float, target_p: float = 0.2,
-                    tol: float = 0.03, max_iter: int = 15,
-                    n_burnin: int = 200, n_sample: int = 600) -> float:
+def probe_run_stats(params: SimulationParams, n_burnin: int = 200,
+                    n_sample: int = 400, seed: int = None) -> Dict[str, float]:
+    """Probe run to measure magnetization and holonomy statistics."""
+    rng = np.random.default_rng(seed)
+    lattice = TwoGateLattice(params, rng)
+
+    for _ in range(n_burnin):
+        lattice.sweep()
+
+    abs_m = []
+    phi_median = []
+    phi_q = []
+    phi_q99 = []
+    phi_max = []
+
+    for _ in range(n_sample):
+        lattice.sweep()
+        abs_phi = np.abs(lattice._phi_cache)
+        abs_m.append(abs(lattice.magnetization()))
+        phi_median.append(np.median(abs_phi))
+        phi_q.append(np.quantile(abs_phi, params.q_level))
+        phi_q99.append(np.quantile(abs_phi, 0.99))
+        phi_max.append(np.max(abs_phi))
+
+    return {
+        'mean_abs_m': float(np.mean(abs_m)),
+        'median_abs_phi': float(np.median(phi_median)),
+        'median_q_level': float(np.median(phi_q)),
+        'median_q99': float(np.median(phi_q99)),
+        'median_max': float(np.median(phi_max)),
+        'mean_q_level': float(np.mean(phi_q)),
+    }
+
+
+def _estimate_p_geo(params: SimulationParams, delta: float,
+                    n_burnin: int, n_sample: int, seed: int) -> float:
+    p_geo, _ = run_calibration_point(params, delta, m_tol=1.0,
+                                     n_burnin=n_burnin, n_sample=n_sample, seed=seed)
+    return p_geo
+
+
+def calibrate_delta(params: SimulationParams, target_p: float, median_q: float,
+                    n_burnin: int = 200, n_sample: int = 600,
+                    max_iter: int = 12, seed_base: int = 123) -> Tuple[float, bool]:
     """Bisection search to find δ such that p_geo(δ) ≈ target_p."""
-    print(f"  Calibrating δ for p_geo ≈ {target_p}...")
+    print(f"  Calibrating δ for p_geo ≈ {target_p:.3f} (q_level={params.q_level:.2f})...")
 
-    # Start with initial bracket
-    delta_low, delta_high = 0.05, 1.5
+    base = max(median_q, 1e-3)
+    delta_low = max(0.5 * base, 1e-4)
+    delta_high = min(1.5 * base, np.pi)
 
-    # Check bounds
-    p_low, _ = run_calibration_point(params, delta_low, m_tol,
-                                     n_burnin=n_burnin, n_sample=n_sample, seed=42)
-    p_high, _ = run_calibration_point(params, delta_high, m_tol,
-                                      n_burnin=n_burnin, n_sample=n_sample, seed=42)
-    print(f"    Initial: δ={delta_low:.3f} -> p_geo={p_low:.3f}, δ={delta_high:.3f} -> p_geo={p_high:.3f}")
+    p_low = _estimate_p_geo(params, delta_low, n_burnin, n_sample, seed_base)
+    p_high = _estimate_p_geo(params, delta_high, n_burnin, n_sample, seed_base)
+    print(f"    Initial bracket: δ={delta_low:.4f} -> p_geo={p_low:.3f}, "
+          f"δ={delta_high:.4f} -> p_geo={p_high:.3f}")
 
+    expand_steps = 0
+    while not (p_low < target_p < p_high) and expand_steps < 6:
+        if p_low >= target_p:
+            delta_high = delta_low
+            delta_low = max(delta_low * 0.5, 1e-4)
+        elif p_high <= target_p:
+            delta_low = delta_high
+            delta_high = min(delta_high * 1.5, np.pi)
+        p_low = _estimate_p_geo(params, delta_low, n_burnin, n_sample, seed_base)
+        p_high = _estimate_p_geo(params, delta_high, n_burnin, n_sample, seed_base)
+        expand_steps += 1
+        print(f"    Expanded bracket {expand_steps}: δ={delta_low:.4f} -> p_geo={p_low:.3f}, "
+              f"δ={delta_high:.4f} -> p_geo={p_high:.3f}")
+
+    if not (p_low < target_p < p_high):
+        print("    Failed to bracket target p_geo; marking κ infeasible.")
+        return delta_high, False
+
+    delta_mid = delta_high
     for it in range(max_iter):
-        delta_mid = (delta_low + delta_high) / 2
-        p_mid, _ = run_calibration_point(params, delta_mid, m_tol,
-                                         n_burnin=n_burnin, n_sample=n_sample, seed=42 + it)
-        print(f"    Iter {it+1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
-
-        if abs(p_mid - target_p) < tol:
-            print(f"  Converged: δ = {delta_mid:.4f} (p_geo = {p_mid:.3f})")
-            return delta_mid
-
+        delta_mid = 0.5 * (delta_low + delta_high)
+        p_mid = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + it)
+        print(f"    Iter {it + 1}: δ={delta_mid:.4f} -> p_geo={p_mid:.3f}")
         if p_mid < target_p:
             delta_low = delta_mid
         else:
             delta_high = delta_mid
 
-    delta_final = (delta_low + delta_high) / 2
-    p_final, _ = run_calibration_point(params, delta_final, m_tol,
-                                       n_burnin=n_burnin, n_sample=n_sample, seed=99)
-    print(f"  Final: δ = {delta_final:.4f} (p_geo = {p_final:.3f})")
-    return delta_final
+    p_final = _estimate_p_geo(params, delta_mid, n_burnin, n_sample, seed_base + 99)
+    print(f"  Final δ={delta_mid:.4f} -> p_geo={p_final:.3f}")
+    return delta_mid, True
 
 
 def calibrate_m_tol(params: SimulationParams, delta: float, target_p: float,
-                    tol: float = 0.03, max_iter: int = 15,
-                    n_burnin: int = 200, n_sample: int = 600) -> float:
+                    n_burnin: int = 200, n_sample: int = 600,
+                    max_iter: int = 12, seed_base: int = 321) -> Tuple[float, bool]:
     """Bisection search to find m_tol such that p_neu(m_tol) ≈ target_p."""
     print(f"  Calibrating m_tol for p_neu ≈ {target_p:.3f}...")
 
-    m_low, m_high = 0.01, 0.5
-
+    m_low, m_high = 0.01, 0.99
     _, p_low = run_calibration_point(params, delta, m_low,
-                                     n_burnin=n_burnin, n_sample=n_sample, seed=42)
+                                     n_burnin=n_burnin, n_sample=n_sample, seed=seed_base)
     _, p_high = run_calibration_point(params, delta, m_high,
-                                      n_burnin=n_burnin, n_sample=n_sample, seed=42)
-    print(f"    Initial: m={m_low:.3f} -> p_neu={p_low:.3f}, m={m_high:.3f} -> p_neu={p_high:.3f}")
+                                      n_burnin=n_burnin, n_sample=n_sample, seed=seed_base)
+    print(f"    Initial bracket: m={m_low:.3f} -> p_neu={p_low:.3f}, "
+          f"m={m_high:.3f} -> p_neu={p_high:.3f}")
 
-    if p_high < target_p:
-        print(f"    Warning: p_neu({m_high}) = {p_high:.3f} < target. Increasing m_high.")
-        m_high = 1.0
-        _, p_high = run_calibration_point(params, delta, m_high,
-                                          n_burnin=n_burnin, n_sample=n_sample, seed=42)
+    if not (p_low < target_p < p_high):
+        print("    Failed to bracket target p_neu.")
+        return m_high, False
 
+    m_mid = m_high
     for it in range(max_iter):
-        m_mid = (m_low + m_high) / 2
+        m_mid = 0.5 * (m_low + m_high)
         _, p_mid = run_calibration_point(params, delta, m_mid,
-                                         n_burnin=n_burnin, n_sample=n_sample, seed=42 + it)
-        print(f"    Iter {it+1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
-
-        if abs(p_mid - target_p) < tol:
-            print(f"  Converged: m_tol = {m_mid:.4f} (p_neu = {p_mid:.3f})")
-            return m_mid
-
+                                         n_burnin=n_burnin, n_sample=n_sample,
+                                         seed=seed_base + it)
+        print(f"    Iter {it + 1}: m={m_mid:.4f} -> p_neu={p_mid:.3f}")
         if p_mid < target_p:
             m_low = m_mid
         else:
             m_high = m_mid
 
-    m_final = (m_low + m_high) / 2
-    _, p_final = run_calibration_point(params, delta, m_final,
-                                       n_burnin=n_burnin, n_sample=n_sample, seed=99)
-    print(f"  Final: m_tol = {m_final:.4f} (p_neu = {p_final:.3f})")
-    return m_final
+    _, p_final = run_calibration_point(params, delta, m_mid,
+                                       n_burnin=n_burnin, n_sample=n_sample,
+                                       seed=seed_base + 99)
+    print(f"  Final m_tol={m_mid:.4f} -> p_neu={p_final:.3f}")
+    return m_mid, True
 
 
 def run_main_sweep_point(args):
-    """Worker function for parallel sweep."""
+    """Worker function for main measurement run."""
     params, delta, m_tol, seed = args
     rng = np.random.default_rng(seed)
     lattice = TwoGateLattice(params, rng)
@@ -460,7 +506,7 @@ def run_main_sweep_point(args):
             phi_sum += lattice.mean_holonomy_magnitude()
             abs_phi = np.abs(lattice._phi_cache)
             phi_median_sum += np.median(abs_phi)
-            phi_q95_sum += np.quantile(abs_phi, 0.95)
+            phi_q95_sum += np.quantile(abs_phi, params.q_level)
             phi_max_sum += np.max(abs_phi)
 
         batch_geo.append(geo_count / batch_size)
@@ -525,10 +571,10 @@ def run_main_sweep_point(args):
     }
 
 
-def create_figures(results: List[Dict], kappa_values: List[float], delta: float, output_dir: str = "."):
+def create_figures(results: List[Dict], output_dir: str = "."):
     """Create the 4 required figures."""
 
-    kappa_arr = np.array(kappa_values)
+    epsilon_targets = np.array([r['epsilon_target'] for r in results])
     p_geo_arr = np.array([r['p_geo'] for r in results])
     p_neu_arr = np.array([r['p_neu'] for r in results])
     p_both_arr = np.array([r['p_both'] for r in results])
@@ -537,38 +583,51 @@ def create_figures(results: List[Dict], kappa_values: List[float], delta: float,
     stderr_neu_arr = np.array([r['stderr_neu'] for r in results])
     stderr_both_arr = np.array([r['stderr_both'] for r in results])
     stderr_rho_arr = np.array([r['stderr_rho'] for r in results])
+    kappa_arr = np.array([r['kappa'] for r in results])
+    q95_median_arr = np.array([r['q95_median'] for r in results])
+    q99_median_arr = np.array([r['q99_median'] for r in results])
+    qmax_median_arr = np.array([r['qmax_median'] for r in results])
 
-    saturated = np.array([r['saturated'] for r in results], dtype=bool)
+    # 1.png: p_both vs p_geo*p_neu
+    plt.figure(figsize=(8, 8))
+    products = p_geo_arr * p_neu_arr
+    valid = np.isfinite(products) & np.isfinite(p_both_arr) & (products > 0)
 
-    # 1.png: p_geo, p_neu, p_both vs κ
-    plt.figure(figsize=(10, 7))
-    plt.errorbar(kappa_arr, p_geo_arr, yerr=stderr_geo_arr, fmt='bo-', label='p_geo', capsize=4)
-    plt.errorbar(kappa_arr, p_neu_arr, yerr=stderr_neu_arr, fmt='gs-', label='p_neu', capsize=4)
-    plt.errorbar(kappa_arr, p_both_arr, yerr=stderr_both_arr, fmt='r^-', label='p_both', capsize=4)
-    plt.xlabel('κ', fontsize=14)
-    plt.ylabel('Probability', fontsize=14)
-    plt.title(f'Gate Probabilities vs κ (δ={delta:.3f})', fontsize=14)
+    if np.any(valid):
+        plt.scatter(products[valid], p_both_arr[valid], c=epsilon_targets[valid],
+                    cmap='viridis', s=140, edgecolors='black', linewidths=1.2)
+        plt.colorbar(label='ε target')
+        max_val = max(np.max(products[valid]), np.max(p_both_arr[valid])) * 1.1
+        plt.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x')
+    else:
+        max_val = 1.0
+        plt.text(0.5, 0.5, 'No valid points', transform=plt.gca().transAxes,
+                 ha='center', va='center')
+
+    plt.xlabel('p_geo × p_neu', fontsize=14)
+    plt.ylabel('p_both', fontsize=14)
+    plt.title('Matched-permeability: p_both vs p_geo·p_neu', fontsize=14)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
+    plt.axis('equal')
+    plt.xlim(0, max_val)
+    plt.ylim(0, max_val)
     plt.tight_layout()
     plt.savefig(f'{output_dir}/1.png', dpi=150)
     plt.close()
     print(f"Saved: {output_dir}/1.png")
 
-    # 2.png: rho vs κ
+    # 2.png: rho vs epsilon target
     plt.figure(figsize=(10, 6))
     valid_rho = np.isfinite(rho_arr)
-    valid_err = np.isfinite(stderr_rho_arr)
-    kappa_plot = kappa_arr[valid_rho]
-    rho_plot = rho_arr[valid_rho]
-    err_plot = np.where(valid_err[valid_rho], stderr_rho_arr[valid_rho], 0)
-
-    plt.errorbar(kappa_plot, rho_plot, yerr=err_plot, fmt='ko-', markersize=8,
-                 linewidth=2, capsize=4, capthick=1.5, label='ρ(κ)')
-    plt.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='ρ=1 (independence)')
-    plt.xlabel('κ', fontsize=14)
+    err_plot = np.where(np.isfinite(stderr_rho_arr), stderr_rho_arr, 0)
+    plt.errorbar(epsilon_targets[valid_rho], rho_arr[valid_rho],
+                 yerr=err_plot[valid_rho], fmt='ko-', markersize=8,
+                 linewidth=2, capsize=4, capthick=1.5)
+    plt.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='ρ=1')
+    plt.xlabel('ε target', fontsize=14)
     plt.ylabel('ρ = p_both / (p_geo × p_neu)', fontsize=14)
-    plt.title('Gate Correlation Ratio vs κ', fontsize=14)
+    plt.title('Gate correlation ratio vs ε', fontsize=14)
     plt.legend(fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -576,45 +635,14 @@ def create_figures(results: List[Dict], kappa_values: List[float], delta: float,
     plt.close()
     print(f"Saved: {output_dir}/2.png")
 
-    # 3.png: Scatter p_both vs p_geo*p_neu
-    plt.figure(figsize=(8, 8))
-    products = p_geo_arr * p_neu_arr
-    valid = np.isfinite(products) & np.isfinite(p_both_arr) & (products > 0)
-
-    if np.any(valid):
-        plt.scatter(products[valid], p_both_arr[valid], c=kappa_arr[valid], cmap='viridis',
-                    s=140, edgecolors='black', linewidths=1.2)
-        plt.colorbar(label='κ')
-        max_val = max(np.max(products[valid]), np.max(p_both_arr[valid])) * 1.1
-        plt.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='y=x (independence)')
-    else:
-        max_val = 1.0
-        plt.text(0.5, 0.5, 'No valid points for scatter',
-                 transform=plt.gca().transAxes, ha='center', va='center')
-
-    plt.xlabel('p_geo × p_neu', fontsize=14)
-    plt.ylabel('p_both', fontsize=14)
-    plt.title('Gate Independence Test (color = κ)', fontsize=14)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.axis('equal')
-    plt.xlim(0, max_val)
-    plt.ylim(0, max_val)
-    plt.tight_layout()
-    plt.savefig(f'{output_dir}/3.png', dpi=150)
-    plt.close()
-    print(f"Saved: {output_dir}/3.png")
-
-    # 4.png: Matched-square test
-    epsilon = (p_geo_arr + p_neu_arr) / 2
-    eps_sq = epsilon**2
-    fit_mask = (~saturated) & np.isfinite(eps_sq) & np.isfinite(p_both_arr)
-
+    # 3.png: p_both vs epsilon^2 (epsilon_hat)
+    epsilon_hat = (p_geo_arr + p_neu_arr) / 2
+    eps_sq = epsilon_hat**2
     plt.figure(figsize=(10, 7))
-    plt.scatter(eps_sq, p_both_arr, c=kappa_arr, cmap='plasma',
-                s=140, edgecolors='black', linewidths=1.2)
-    plt.colorbar(label='κ')
+    plt.errorbar(eps_sq, p_both_arr, yerr=stderr_both_arr, fmt='o',
+                 markersize=8, capsize=4, label='data')
 
+    fit_mask = np.isfinite(eps_sq) & np.isfinite(p_both_arr)
     if np.sum(fit_mask) >= 2:
         coeff = np.polyfit(eps_sq[fit_mask], p_both_arr[fit_mask], 1)
         fit_line = np.poly1d(coeff)
@@ -622,19 +650,33 @@ def create_figures(results: List[Dict], kappa_values: List[float], delta: float,
         plt.plot(x_fit, fit_line(x_fit), 'k--', linewidth=2,
                  label=f'fit: y={coeff[0]:.2f}x+{coeff[1]:.3f}')
 
-    plt.xlabel('ε² where ε=(p_geo+p_neu)/2', fontsize=14)
+    plt.xlabel('ε̂² with ε̂=(p_geo+p_neu)/2', fontsize=14)
     plt.ylabel('p_both', fontsize=14)
     plt.title('Matched-square test', fontsize=14)
     plt.legend(fontsize=11)
     plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f'{output_dir}/3.png', dpi=150)
+    plt.close()
+    print(f"Saved: {output_dir}/3.png")
 
-    inset = plt.axes([0.62, 0.15, 0.3, 0.3])
-    ratio = np.where(eps_sq > 0, p_both_arr / eps_sq, np.nan)
-    inset.plot(kappa_arr, ratio, 'o-', color='tab:purple', markersize=4)
-    inset.axhline(1.0, color='gray', linestyle='--', linewidth=1)
-    inset.set_xlabel('κ', fontsize=9)
-    inset.set_ylabel('p_both/ε²', fontsize=9)
+    # 4.png: chosen κ vs epsilon target with q95 stats inset
+    plt.figure(figsize=(10, 7))
+    plt.plot(epsilon_targets, kappa_arr, 'o-', linewidth=2, label='chosen κ')
+    plt.xlabel('ε target', fontsize=14)
+    plt.ylabel('κ', fontsize=14)
+    plt.title('Regime selection (κ vs ε)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
+
+    inset = plt.axes([0.55, 0.2, 0.35, 0.3])
+    inset.plot(epsilon_targets, q95_median_arr, 'o-', label='median q95')
+    inset.plot(epsilon_targets, q99_median_arr, 's--', label='median q99')
+    inset.plot(epsilon_targets, qmax_median_arr, 'd-.', label='median max')
+    inset.set_xlabel('ε', fontsize=9)
+    inset.set_ylabel('|Phi| stats', fontsize=9)
     inset.grid(True, alpha=0.3)
+    inset.legend(fontsize=8)
 
     plt.tight_layout()
     plt.savefig(f'{output_dir}/4.png', dpi=150)
@@ -656,134 +698,186 @@ def main():
 
     start_time = time.time()
 
-    # Base parameters
     params = SimulationParams(
         L=24, T=1.0, J=0.6, h=0.0,
         kappa=50.0, g=0.5,
         mu=1.0, gamma=0.5, sigma=1.0,
         dtheta=0.6,
-        n_burnin=400, n_sample=1600, n_batches=20
+        n_burnin=600, n_sample=2400, n_batches=30,
+        q_level=0.95
     )
 
-    kappa_list = [10, 15, 20, 30, 40, 50, 65, 80, 100]
+    epsilon_targets = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
+    kappa_candidates = [20, 30, 40, 50, 65, 80, 100, 130]
+    cal_burnin = 200
+    cal_sample = 600
 
     if args.smoke_test:
-        params.L = 8
-        params.n_burnin = 50
-        params.n_sample = 100
-        params.n_batches = 10
-        kappa_list = [30, 50]
+        params = replace(params, L=8, n_burnin=120, n_sample=300, n_batches=10)
+        epsilon_targets = [0.2, 0.4]
+        kappa_candidates = [40, 50]
+        cal_burnin = 50
+        cal_sample = 100
 
     print(f"\nBase parameters:")
     print(f"  L={params.L}, T={params.T}, J={params.J}, g={params.g}")
     print(f"  mu={params.mu}, gamma={params.gamma}, sigma={params.sigma}")
+    print(f"  q_level={params.q_level:.2f}")
 
-    # Target probability for calibration
-    target_p = 0.2
-
-    # ========== CALIBRATION ==========
+    # ========== PHASE 1: ORDERED-PHASE CHECK ==========
     print("\n" + "=" * 70)
-    print("PHASE 1: CALIBRATION")
+    print("PHASE 1: ORDERED-PHASE CHECK")
     print("=" * 70)
 
-    # Calibrate δ using κ_ref=50
-    kappa_ref = 50
-    params_ref = replace(params, kappa=kappa_ref)
-    delta = calibrate_delta(params_ref, m_tol=0.1, target_p=target_p,
-                            n_burnin=200 if not args.smoke_test else params.n_burnin,
-                            n_sample=600 if not args.smoke_test else params.n_sample)
+    probe_params = replace(params, kappa=50.0, g=0.5, h=0.0)
+    probe_stats = probe_run_stats(probe_params, n_burnin=200, n_sample=400, seed=101)
+    print(f"  Probe mean|m|={probe_stats['mean_abs_m']:.3f} at J={probe_params.J}, T={probe_params.T}")
 
-    print(f"\n  FINAL CALIBRATION: δ = {delta:.4f} (κ_ref={kappa_ref})")
+    if probe_stats['mean_abs_m'] > 0.5:
+        probe_params = replace(probe_params, T=max(probe_params.T, 1.6))
+        probe_stats = probe_run_stats(probe_params, n_burnin=200, n_sample=400, seed=102)
+        print(f"  Raised T: mean|m|={probe_stats['mean_abs_m']:.3f} at J={probe_params.J}, T={probe_params.T}")
 
-    # ========== MAIN SWEEP ==========
+    if probe_stats['mean_abs_m'] > 0.5:
+        probe_params = replace(probe_params, J=0.4)
+        probe_stats = probe_run_stats(probe_params, n_burnin=200, n_sample=400, seed=103)
+        print(f"  Lowered J: mean|m|={probe_stats['mean_abs_m']:.3f} at J={probe_params.J}, T={probe_params.T}")
+
+    if probe_stats['mean_abs_m'] > 0.3:
+        print("  Warning: mean|m| remains > 0.3; neutrality gating may be tight.")
+
+    params = replace(params, J=probe_params.J, T=probe_params.T)
+    print(f"  Selected (J,T)=({params.J},{params.T}) with mean|m|={probe_stats['mean_abs_m']:.3f}")
+
+    # ========== PHASE 2: KAPPA FEASIBILITY SCAN ==========
     print("\n" + "=" * 70)
-    print("PHASE 2: MAIN SWEEP")
+    print("PHASE 2: KAPPA FEASIBILITY SCAN")
     print("=" * 70)
 
-    print(f"\n  Running κ sweep with {len(kappa_list)} values...")
-    print(f"  (burn-in: {params.n_burnin}, samples: {params.n_sample}, batches: {params.n_batches})")
+    kappa_stats = {}
+    feasible_kappas = []
 
-    jobs = []
-    m_tol_map = {}
-
-    for i, kappa in enumerate(kappa_list):
+    for kappa in kappa_candidates:
         params_k = replace(params, kappa=kappa)
-        p_geo_est, _ = run_calibration_point(
-            params_k, delta, m_tol=0.1,
-            n_burnin=200 if not args.smoke_test else params.n_burnin,
-            n_sample=600 if not args.smoke_test else params.n_sample,
-            seed=100 + i
-        )
-        target_p_neu = float(np.clip(p_geo_est, 0.05, 0.5))
-        print(f"\n  κ={kappa:.1f}: p_geo≈{p_geo_est:.3f} => target p_neu={target_p_neu:.3f}")
-        m_tol = calibrate_m_tol(
-            params_k, delta, target_p=target_p_neu,
-            n_burnin=200 if not args.smoke_test else params.n_burnin,
-            n_sample=600 if not args.smoke_test else params.n_sample
-        )
-        m_tol_map[kappa] = m_tol
-        jobs.append((params_k, delta, m_tol, 1000 + i))
+        stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=200 + int(kappa))
+        kappa_stats[kappa] = stats
+        print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
+              f"q95={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
+              f"max={stats['median_max']:.4f}")
 
-    n_workers = min(len(kappa_list), cpu_count())
-    print(f"\n  Using {n_workers} parallel workers...")
+        delta_try, ok = calibrate_delta(params_k, target_p=0.2,
+                                        median_q=stats['median_q_level'],
+                                        n_burnin=cal_burnin, n_sample=cal_sample,
+                                        seed_base=400 + int(kappa))
+        if ok:
+            feasible_kappas.append(kappa)
+            print(f"    Feasible κ={kappa:.1f} with δ≈{delta_try:.4f}")
+        else:
+            print(f"    Infeasible κ={kappa:.1f}")
 
-    with Pool(n_workers) as pool:
-        results = pool.map(run_main_sweep_point, jobs)
+    if not feasible_kappas and params.q_level > 0.90:
+        print("\n  No feasible κ found. Relaxing q_level to 0.90 and rescanning once.")
+        params = replace(params, q_level=0.90)
+        feasible_kappas = []
+        for kappa in kappa_candidates:
+            params_k = replace(params, kappa=kappa)
+            stats = probe_run_stats(params_k, n_burnin=200, n_sample=400, seed=260 + int(kappa))
+            kappa_stats[kappa] = stats
+            print(f"  κ={kappa:>5.1f}: median(|Phi|)={stats['median_abs_phi']:.4f}, "
+                  f"q90={stats['median_q_level']:.4f}, q99={stats['median_q99']:.4f}, "
+                  f"max={stats['median_max']:.4f}")
+            delta_try, ok = calibrate_delta(params_k, target_p=0.2,
+                                            median_q=stats['median_q_level'],
+                                            n_burnin=cal_burnin, n_sample=cal_sample,
+                                            seed_base=460 + int(kappa))
+            if ok:
+                feasible_kappas.append(kappa)
+                print(f"    Feasible κ={kappa:.1f} with δ≈{delta_try:.4f}")
 
-    for kappa, result in zip(kappa_list, results):
-        result['kappa'] = kappa
-        result['delta'] = delta
-        result['m_tol'] = m_tol_map[kappa]
-        result['saturated'] = (result['p_geo'] < 0.02) or (result['p_geo'] > 0.98)
+    if not feasible_kappas:
+        raise RuntimeError("No feasible κ found; cannot proceed with matched-permeability test.")
 
-    # ========== ANALYSIS ==========
+    print(f"\n  Feasible κ values: {feasible_kappas}")
+
+    # ========== PHASE 3: MATCHED-PERMEABILITY TEST ==========
     print("\n" + "=" * 70)
-    print("PHASE 3: ANALYSIS")
+    print("PHASE 3: MATCHED-PERMEABILITY TEST")
     print("=" * 70)
 
-    # Print table
-    print("\n  Results table:")
-    print("  " + "-" * 110)
-    print(f"  {'κ':>6} | {'δ':>6} | {'m_tol':>6} | {'p_geo':>7} | {'p_neu':>7} | "
-          f"{'p_both':>7} | {'ρ':>7} | {'sat':>5}")
-    print("  " + "-" * 110)
+    results = []
+    for idx, epsilon in enumerate(epsilon_targets):
+        print(f"\n  Target ε={epsilon:.2f}")
+        chosen = None
+        for kappa in feasible_kappas:
+            params_k = replace(params, kappa=kappa)
+            stats = kappa_stats[kappa]
+            delta, ok_delta = calibrate_delta(params_k, target_p=epsilon,
+                                              median_q=stats['median_q_level'],
+                                              n_burnin=cal_burnin, n_sample=cal_sample,
+                                              seed_base=700 + idx * 10 + int(kappa))
+            if not ok_delta:
+                continue
+            m_tol, ok_m = calibrate_m_tol(params_k, delta, target_p=epsilon,
+                                          n_burnin=cal_burnin, n_sample=cal_sample,
+                                          seed_base=900 + idx * 10 + int(kappa))
+            if ok_m:
+                chosen = (kappa, delta, m_tol)
+                break
 
-    p_geo_arr = np.array([r['p_geo'] for r in results])
-    p_neu_arr = np.array([r['p_neu'] for r in results])
-    p_both_arr = np.array([r['p_both'] for r in results])
-    rho_arr = np.array([r['rho'] for r in results])
+        if chosen is None:
+            raise RuntimeError(f"Failed to find feasible κ for ε={epsilon:.2f}.")
 
-    for r in results:
-        rho_str = f"{r['rho']:.3f}" if np.isfinite(r['rho']) else "nan"
-        sat_str = "yes" if r['saturated'] else "no"
-        print(f"  {r['kappa']:>6.1f} | {r['delta']:>6.4f} | {r['m_tol']:>6.4f} | "
-              f"{r['p_geo']:>7.4f} | {r['p_neu']:>7.4f} | {r['p_both']:>7.4f} | "
-              f"{rho_str:>7} | {sat_str:>5}")
+        kappa, delta, m_tol = chosen
+        print(f"  Selected κ={kappa:.1f}, δ={delta:.4f}, m_tol={m_tol:.4f}")
+        params_final = replace(params, kappa=kappa)
+        measurement = run_main_sweep_point((params_final, delta, m_tol, 2000 + idx))
 
-    print("  " + "-" * 110)
+        results.append({
+            'epsilon_target': epsilon,
+            'kappa': kappa,
+            'delta': delta,
+            'm_tol': m_tol,
+            'p_geo': measurement['p_geo'],
+            'p_neu': measurement['p_neu'],
+            'p_both': measurement['p_both'],
+            'rho': measurement['rho'],
+            'stderr_geo': measurement['stderr_geo'],
+            'stderr_neu': measurement['stderr_neu'],
+            'stderr_both': measurement['stderr_both'],
+            'stderr_rho': measurement['stderr_rho'],
+            'accept_spin': measurement['accept_spin'],
+            'accept_theta': measurement['accept_theta'],
+            'mean_abs_phi': measurement['mean_phi'],
+            'mean_m': measurement['mean_m'],
+            'q95_median': kappa_stats[kappa]['median_q_level'],
+            'q99_median': kappa_stats[kappa]['median_q99'],
+            'qmax_median': kappa_stats[kappa]['median_max'],
+            'J': params.J,
+            'T': params.T,
+            'g': params.g,
+            'mu': params.mu,
+            'gamma': params.gamma,
+            'sigma': params.sigma,
+        })
 
-    valid_rho = np.isfinite(rho_arr)
-    rho_valid = rho_arr[valid_rho]
-    if len(rho_valid) > 0:
-        mean_rho = np.mean(rho_valid)
-        stderr_rho = np.std(rho_valid) / np.sqrt(len(rho_valid))
-        print(f"\n  Mean ρ across κ: {mean_rho:.3f} ± {stderr_rho:.3f}")
-
-    # ========== OUTPUT FILES ==========
+    # ========== PHASE 4: SAVING OUTPUT ==========
     print("\n" + "=" * 70)
     print("PHASE 4: SAVING OUTPUT")
     print("=" * 70)
 
-    # Save CSV
-    csv_filename = "clean_exponent_results.csv"
+    csv_filename = "robust_matched_results.csv"
     with open(csv_filename, 'w', newline='') as f:
-        fieldnames = ['kappa', 'delta', 'm_tol', 'p_geo', 'p_neu', 'p_both', 'rho',
-                      'stderr_p_geo', 'stderr_p_neu', 'stderr_p_both', 'stderr_rho',
-                      'accept_spin', 'accept_theta', 'mean_abs_phi', 'mean_m', 'saturated']
+        fieldnames = [
+            'epsilon_target', 'kappa', 'delta', 'm_tol', 'p_geo', 'p_neu', 'p_both', 'rho',
+            'stderr_p_geo', 'stderr_p_neu', 'stderr_p_both', 'stderr_rho',
+            'J', 'T', 'g', 'mu', 'gamma', 'sigma',
+            'mean_abs_phi', 'mean_m', 'accept_spin', 'accept_theta'
+        ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
             writer.writerow({
+                'epsilon_target': r['epsilon_target'],
                 'kappa': r['kappa'],
                 'delta': r['delta'],
                 'm_tol': r['m_tol'],
@@ -795,16 +889,20 @@ def main():
                 'stderr_p_neu': r['stderr_neu'],
                 'stderr_p_both': r['stderr_both'],
                 'stderr_rho': r['stderr_rho'],
+                'J': r['J'],
+                'T': r['T'],
+                'g': r['g'],
+                'mu': r['mu'],
+                'gamma': r['gamma'],
+                'sigma': r['sigma'],
+                'mean_abs_phi': r['mean_abs_phi'],
+                'mean_m': r['mean_m'],
                 'accept_spin': r['accept_spin'],
                 'accept_theta': r['accept_theta'],
-                'mean_abs_phi': r['mean_phi'],
-                'mean_m': r['mean_m'],
-                'saturated': r['saturated'],
             })
     print(f"  Saved: {csv_filename}")
 
-    # Create figures
-    create_figures(results, kappa_list, delta, output_dir=".")
+    create_figures(results, output_dir=".")
 
     # ========== FINAL REPORT ==========
     elapsed = time.time() - start_time
@@ -812,16 +910,14 @@ def main():
     print("FINAL REPORT")
     print("=" * 70)
 
-    print(f"\n  Calibrated threshold:")
-    print(f"    δ = {delta:.4f} (κ_ref={kappa_ref})")
-
+    rho_arr = np.array([r['rho'] for r in results])
+    rho_valid = rho_arr[np.isfinite(rho_arr)]
     if len(rho_valid) > 0:
-        print(f"\n  Gate independence:")
-        print(f"    Mean ρ = {mean_rho:.3f} ± {stderr_rho:.3f}")
+        mean_rho = np.mean(rho_valid)
+        stderr_rho = np.std(rho_valid) / np.sqrt(len(rho_valid))
+        print(f"\n  Mean ρ across ε: {mean_rho:.3f} ± {stderr_rho:.3f}")
 
-    print(f"\n  Data quality:")
-    print(f"    Total κ points: {len(kappa_list)}")
-
+    print(f"\n  Data points: {len(results)}")
     print(f"\n  Total runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
     print("=" * 70)
 
@@ -829,8 +925,9 @@ def main():
         print("\nSmoke test summary:")
         for res in results:
             rho_str = f"{res['rho']:.3f}" if np.isfinite(res['rho']) else "nan"
-            print(f"  κ={res['kappa']:.1f}: p_geo={res['p_geo']:.4f}, "
-                  f"p_neu={res['p_neu']:.4f}, p_both={res['p_both']:.4f}, rho={rho_str}")
+            print(f"  ε={res['epsilon_target']:.2f} κ={res['kappa']:.1f}: "
+                  f"p_geo={res['p_geo']:.4f}, p_neu={res['p_neu']:.4f}, "
+                  f"p_both={res['p_both']:.4f}, rho={rho_str}")
 
 
 if __name__ == "__main__":
