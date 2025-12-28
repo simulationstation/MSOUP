@@ -10,7 +10,11 @@ import numpy as np
 
 from mverse_channel.config import SimulationConfig
 from mverse_channel.metrics.anomaly_score import anomaly_score
-from mverse_channel.metrics.correlations import cross_correlation, cross_spectral_density
+from mverse_channel.metrics.correlations import (
+    cross_correlation,
+    cross_spectral_density,
+    coherence_peak_magnitude,
+)
 from mverse_channel.metrics.memory import fit_ou_timescale
 from mverse_channel.metrics.non_gaussian import excess_kurtosis, mardia_kurtosis, mardia_skewness
 from mverse_channel.physics.extended_model import simulate_extended
@@ -40,6 +44,11 @@ def compute_metrics(series: Dict[str, np.ndarray], config: SimulationConfig) -> 
         series["ia"], series["ib"], config.measurement.sample_rate
     )
     coherence_peak = float(np.max(coherence))
+    # Primary detection metric: phase-robust coherence magnitude
+    coherence_mag = coherence_peak_magnitude(
+        series["ia"], series["ib"], config.measurement.sample_rate
+    )
+    # Secondary diagnostic only (not used for detection)
     cross_corr = cross_correlation(series["ia"], series["ib"])
     cross_corr_peak = float(np.max(np.abs(cross_corr["corr"])))
     covariance = np.cov(
@@ -65,23 +74,25 @@ def compute_metrics(series: Dict[str, np.ndarray], config: SimulationConfig) -> 
     )
     metrics = {
         "coherence_peak": coherence_peak,
-        "cross_corr_peak": cross_corr_peak,
+        "coherence_mag": coherence_mag,  # Primary detection metric
+        "cross_corr_peak": cross_corr_peak,  # Secondary diagnostic
         "non_gaussian": non_gaussian,
         "mardia_kurtosis": mardia_k,
         "mardia_skewness": mardia_s,
         "memory": memory,
         "covariance": covariance.tolist(),
     }
+    # Anomaly score uses coherence_mag (phase-robust) as primary
     metrics["anomaly_score"] = anomaly_score(
         {
-            "coherence_peak": coherence_peak,
+            "coherence_mag": coherence_mag,
             "non_gaussian": non_gaussian,
             "memory": memory,
         },
         {
-            "coherence_peak": 0.4,
-            "non_gaussian": 0.3,
-            "memory": 0.3,
+            "coherence_mag": 0.5,  # Primary weight on phase-robust metric
+            "non_gaussian": 0.25,
+            "memory": 0.25,
         },
     )
     metrics["freqs"] = float(freqs.size)

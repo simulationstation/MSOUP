@@ -1,4 +1,8 @@
-"""Measurement chain simulation."""
+"""Measurement chain simulation.
+
+Includes standard amplifier noise and optional nuisance models for
+shared noise sources that can create spurious correlations.
+"""
 
 from __future__ import annotations
 
@@ -55,3 +59,58 @@ def apply_measurement_chain(
         qb = signal.filtfilt(b, a, qb)
 
     return ia, qa, ib, qb
+
+
+def apply_nuisance_model(
+    ia: np.ndarray,
+    qa: np.ndarray,
+    ib: np.ndarray,
+    qb: np.ndarray,
+    nuisance_amplitude: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply nuisance-only correlation model (shared noise without gating).
+
+    This model adds correlated noise to both channels without any gating by
+    coherence, topology, or boundary conditions. It serves as an alternative
+    hypothesis to distinguish genuine hidden-channel effects from simple
+    amplifier cross-talk or shared environmental noise.
+
+    Args:
+        ia, qa, ib, qb: Input quadrature signals
+        nuisance_amplitude: Amplitude of shared nuisance noise
+        rng: Random generator
+
+    Returns:
+        Modified signals with shared nuisance noise added
+    """
+    if nuisance_amplitude <= 0.0:
+        return ia, qa, ib, qb
+
+    # Shared noise source affects both channels equally (no gating)
+    shared_noise = rng.normal(0.0, nuisance_amplitude, size=ia.shape)
+
+    ia = ia + shared_noise
+    qa = qa + shared_noise
+    ib = ib + shared_noise
+    qb = qb + shared_noise
+
+    return ia, qa, ib, qb
+
+
+def apply_chain_swap(
+    ia: np.ndarray,
+    qa: np.ndarray,
+    ib: np.ndarray,
+    qb: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Swap readout chains A and B (null test diagnostic).
+
+    Under the null hypothesis (no hidden channel), swapping chains should
+    not change detection statistics. Under the alternative (hidden channel),
+    swapping may affect results if the channel is asymmetric.
+
+    Returns:
+        Swapped signals: (ib, qb, ia, qa)
+    """
+    return ib.copy(), qb.copy(), ia.copy(), qa.copy()

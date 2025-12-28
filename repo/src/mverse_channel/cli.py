@@ -81,11 +81,16 @@ def report(data_dir: Path, out: Path) -> None:
 
 
 @app.command()
-def sweep(config: Path, out: Path) -> None:
-    """Run a power sweep."""
+def sweep(
+    config: Path,
+    out: Path,
+    alpha: float = 0.05,
+    n_calibration: int = 50,
+) -> None:
+    """Run a power sweep with null-calibrated thresholds."""
     sweep_config = load_config(config, SweepConfig)
-    results = power_sweep(sweep_config, out)
-    plot_detection_curve(results, out / "detection_curve.png")
+    results = power_sweep(sweep_config, out, alpha=alpha, n_calibration=n_calibration)
+    plot_detection_curve(results, out / "detection_curve.png", alpha=alpha)
 
 
 @app.command("end-to-end")
