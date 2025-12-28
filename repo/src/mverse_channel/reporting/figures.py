@@ -16,16 +16,23 @@ from mverse_channel.metrics.correlations import cross_spectral_density, coherenc
 
 
 def plot_coherence(series: Dict[str, np.ndarray], fs: float, out_path: Path) -> None:
-    """Plot coherence magnitude spectrum (phase-robust)."""
+    """Plot coherence magnitude spectrum (phase-robust).
+
+    Uses ylim padding and markers to ensure visibility even when
+    coherence saturates near 1.0 due to short time series.
+    """
     freqs, coh_mag = coherence_magnitude(series["ia"], series["ib"], fs)
     plt.figure(figsize=(6, 4))
-    plt.plot(freqs, coh_mag)
+    # Use markers to ensure visibility even at y=1.0 boundary
+    plt.plot(freqs, coh_mag, marker="o", markersize=4, linewidth=1.5)
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("Coherence Magnitude |Coh(f)|")
     plt.title("Cross-channel Coherence Magnitude (Phase-Robust)")
-    plt.ylim(0, 1)
+    # Pad ylim to 1.05 so lines at y=1.0 are visible
+    plt.ylim(0, 1.05)
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(out_path)
+    plt.savefig(out_path, dpi=150)
     plt.close()
 
 

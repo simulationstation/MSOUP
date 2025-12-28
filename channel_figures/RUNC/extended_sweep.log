@@ -1,0 +1,24 @@
+Extended Power Sweep Configuration:
+  epsilon_values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+  duration: 10.0s
+  dt: 0.05s
+  samples: ~201
+  replicates: 15
+
+Calibrating thresholds with 50 null samples (alpha=0.05)...
+  coherence_mag threshold: 0.9994
+  anomaly_score threshold: 1.2085
+
+Results Summary:
+--------------------------------------------------
+  ε=0.00: detection=0.00, coh_mag=0.9938, anomaly=1.1004
+  ε=0.10: detection=0.00, coh_mag=0.9939, anomaly=1.0982
+  ε=0.20: detection=0.00, coh_mag=0.9940, anomaly=1.1000
+  ε=0.30: detection=0.00, coh_mag=0.9941, anomaly=1.1012
+  ε=0.40: detection=0.00, coh_mag=0.9942, anomaly=1.0992
+  ε=0.50: detection=0.00, coh_mag=0.9943, anomaly=1.0992
+
+Output saved to: /home/primary/MSOUP/channel_figures/extended_sweep
+  - power_sweep.json
+  - thresholds.json
+  - detection_curve.png

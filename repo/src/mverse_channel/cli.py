@@ -95,13 +95,19 @@ def sweep(
 
 @app.command("end-to-end")
 def end_to_end(preset: str = "demo") -> None:
-    """Run an end-to-end demo pipeline."""
+    """Run an end-to-end demo pipeline.
+
+    Demo preset uses duration=10s and dt=0.05 for adequate spectral
+    estimation (~200 samples), avoiding coherence saturation artifacts
+    that occur with shorter time series.
+    """
     if preset != "demo":
         raise typer.BadParameter("Only the demo preset is supported.")
     run_config = RunConfig()
     run_config.simulation.n_levels = 4
-    run_config.simulation.duration = 3.0
-    run_config.simulation.dt = 0.1
+    # Longer duration for adequate spectral estimation (avoid coherence saturation)
+    run_config.simulation.duration = 10.0
+    run_config.simulation.dt = 0.05  # 201 samples total
     run_config.simulation.hidden_channel.enabled = True
     run_config.simulation.hidden_channel.epsilon_max = 0.15
     out_dir = Path("outputs/mverse_demo")
