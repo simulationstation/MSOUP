@@ -56,3 +56,38 @@ python scripts/run_all.py
 ```
 
 The run writes `outputs/REPORT.md`, `outputs/REPORT.json`, and optional figures to `outputs/figures/`.
+
+## Mverse Channel Pipeline
+This repo also includes the `mverse_channel` package, which implements a falsifiable simulation + analysis pipeline for a coherence/topology/boundary-condition gated extra correlation channel hypothesis in superconducting/cavity EM systems.
+
+### Scientific Goal (Operationally Defined)
+- Simulate a baseline open quantum system (two-mode Lindblad model + measurement chain).
+- Simulate an extended model with a gated hidden-sector correlation channel.
+- Fit and compare baseline vs extended models on synthetic data.
+- Quantify detectability with power analysis and pre-registered anomaly scoring.
+
+### Install
+```bash
+pip install -e .
+```
+The pipeline uses QuTiP for Lindblad simulations. Ensure `qutip` is available in your environment.
+
+### Demo End-to-End Run
+```bash
+python -m mverse_channel.cli end-to-end --preset demo
+```
+
+The demo writes `outputs/mverse_demo/data.npz`, `outputs/mverse_demo/metrics.json`, `outputs/mverse_demo/figures/`, and `outputs/mverse_demo/report.md`.
+
+### CLI Examples
+```bash
+python -m mverse_channel.cli simulate --config configs/mverse_channel_example.json --out outputs/mverse_run
+python -m mverse_channel.cli sweep --config configs/mverse_channel_sweep.json --out outputs/mverse_sweep
+python -m mverse_channel.cli report --data-dir outputs/mverse_run --out outputs/mverse_run/report.md
+```
+
+### Detection Criteria
+Detection in sweeps requires both a positive anomaly score and coherence peak above fixed thresholds, and model comparison outputs AIC/BIC deltas for baseline vs extended models.
+
+### Extending Phenomenologies
+Add new hidden-channel phenomenologies in `src/mverse_channel/physics/extended_model.py` by extending the `HiddenChannelConfig` and switching on the `phenomenology` field.
